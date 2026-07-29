@@ -1,19 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
-
-type UploadedFile = {
-  name: string;
-  type: string;
-  size: number;
-};
-
-type UploadResponse = {
-  success: boolean;
-  files?: UploadedFile[];
-  message?: string;
-};
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 type ProjectFileMeta = {
   id: string;
@@ -32,317 +20,145 @@ type ProjectUnderstanding = {
   missingInformation: string[];
 };
 
-const defaultUnderstanding: ProjectUnderstanding = {
-  projectType: "Bathroom Renovation",
-  confidence: 94,
-  detectedFiles: [
-    "2 Drawing PDFs",
-    "18 Site Photos",
-    "1 Existing Quote",
-    "1 Specification",
-  ],
-  possibleRooms: ["Ensuite", "Main Bathroom"],
-  detectedScope: [
-    "Demolition",
-    "Waterproofing",
-    "Floor tile",
-    "Wall tile",
-    "Heated floor",
-    "Shower niche",
-  ],
-  missingInformation: ["Tile selection", "Grout color", "Waterproofing system"],
+type EditingField = 'projectType' | 'possibleRooms' | 'detectedScope' | 'missingInformation';
+
+type EditingItem = {
+  field: EditingField;
+  index: number;
 };
 
-function mergeUnderstanding(
-  aiData: ProjectUnderstanding,
-  userEdits: Partial<ProjectUnderstanding>,
-): ProjectUnderstanding {
-  return {
-    projectType: userEdits.projectType ?? aiData.projectType,
-    confidence: aiData.confidence,
-    detectedFiles: userEdits.detectedFiles ?? aiData.detectedFiles,
-    possibleRooms: userEdits.possibleRooms ?? aiData.possibleRooms,
-    detectedScope: userEdits.detectedScope ?? aiData.detectedScope,
-    missingInformation:
-      userEdits.missingInformation ?? aiData.missingInformation,
-  };
-}
-
-function formatFileSize(size: number) {
-  if (size >= 1_000_000) {
-    return `${(size / 1_000_000).toFixed(1)} MB`;
-  }
-  if (size >= 1_000) {
-    return `${(size / 1_000).toFixed(1)} KB`;
-  }
-  return `${size} B`;
-}
-
-function formatDateTime(dateTime: string) {
-  return new Date(dateTime).toLocaleString([], {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function getFileCategory(type: string, filename: string) {
-  const lowerType = type.toLowerCase();
-  const lowerName = filename.toLowerCase();
-
-  if (lowerType === "application/pdf" || lowerName.endsWith(".pdf")) {
-    return "PDF";
-  }
-  if (lowerType.startsWith("image/") || /(jpg|jpeg|png|gif|bmp|webp|svg)$/.test(lowerName)) {
-    return "Image";
-  }
-  if (lowerType.startsWith("video/") || /(mp4|mov|avi|mkv|webm)$/.test(lowerName)) {
-    return "Video";
-  }
-  if (
-    lowerType === "application/msword" ||
-    lowerType ===
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-    /(doc|docx)$/.test(lowerName)
-  ) {
-    return "Document";
-  }
-  if (
-    lowerType === "application/vnd.ms-excel" ||
-    lowerType ===
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
-    lowerType === "application/vnd.ms-excel.sheet.macroenabled.12" ||
-    /(xls|xlsx|csv)$/.test(lowerName)
-  ) {
-    return "Spreadsheet";
-  }
-  return "Other";
-}
-
-function getFileIcon(category: string) {
-  switch (category) {
-    case "PDF":
-      return "📄";
-    case "Image":
-      return "🖼️";
-    case "Video":
-      return "🎬";
-    case "Document":
-      return "📝";
-    case "Spreadsheet":
-      return "📊";
-    default:
-      return "📁";
-  }
-}
-
-function generateMockProjectNameSuggestions(
-  projectFiles: ProjectFileMeta[],
-  projectName: string,
-) {
-  if (projectFiles.length === 0) {
-    return [];
-  }
-
-  const names = projectFiles
-    .flatMap((file) => file.filename.split(/[^a-zA-Z0-9]+/))
-    .filter(Boolean)
-    .map((word) => word.replace(/\W/g, ""))
-    .filter((word) => word.length >= 4);
-
-  const firstWord =
-    names.find((word) => /^[A-Za-z]/.test(word)) ||
-    projectName.split(/[^a-zA-Z0-9]+/).filter(Boolean)[0] ||
-    "Project";
-
-  const roomMatch = projectFiles.some((file) => /ensuite|bathroom|kitchen|bedroom|master/i.test(file.filename))
-    ? "Ensuite"
-    : "Bathroom";
-
-  const scopeMatch = projectFiles.some((file) => /tile|floor|waterproof|shower|bath|plumbing/i.test(file.filename))
-    ? "Tile Scope"
-    : "Renovation";
-
-  const location = `${firstWord}`;
-
-  return [
-    `${location} ${roomMatch} Renovation`,
-    `${location} ${scopeMatch} Project`,
-    `Master ${roomMatch} ${scopeMatch}`,
-  ];
-}
-
 export default function ProjectPageClient({ projectName }: { projectName: string }) {
-  const [files, setFiles] = useState<UploadedFile[]>([]);
-  const [projectFiles, setProjectFiles] = useState<ProjectFileMeta[]>([]);
-  const [projectTitle, setProjectTitle] = useState(projectName);
-  const [titleDraft, setTitleDraft] = useState(projectName);
-  const [isEditingTitle, setIsEditingTitle] = useState(false);
-  const [showNameSuggestions, setShowNameSuggestions] = useState(false);
-  const [hasSelectedTitle, setHasSelectedTitle] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const [uploadSuccess, setUploadSuccess] = useState(false);
-  const [activity, setActivity] = useState<string[]>([
-    "Project created",
-    "Waiting for project information",
-  ]);
-  const [dragActive, setDragActive] = useState(false);
-  const [hoverActive, setHoverActive] = useState(false);
-  const [uploadDots, setUploadDots] = useState(".");
-  const [isEditingUnderstanding, setIsEditingUnderstanding] = useState(false);
-  const [aiUnderstanding] = useState<ProjectUnderstanding>(defaultUnderstanding);
-  const [userUnderstanding, setUserUnderstanding] = useState<
-    Partial<ProjectUnderstanding>
-  >({});
-  const [editingUnderstanding, setEditingUnderstanding] = useState<
-    ProjectUnderstanding
-  >(defaultUnderstanding);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const titleInputRef = useRef<HTMLInputElement | null>(null);
-  const previousTitleRef = useRef(projectName);
-
   const storageKey = `dimcan:projectUnderstanding:${projectName}`;
   const fileStorageKey = `dimcan:projectFiles:${projectName}`;
   const titleStorageKey = `dimcan:projectTitle:${projectName}`;
+  const notesStorageKey = `dimcan:projectNotes:${projectName}`;
+  const activityStorageKey = `dimcan:projectActivity:${projectName}`;
+  const attrStorageKey = `dimcan:projectAttr:${projectName}`;
 
-  // Load saved user edits from localStorage on mount
+  const [projectTitle, setProjectTitle] = useState(projectName);
+  const [titleDraft, setTitleDraft] = useState(projectName);
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [projectFiles, setProjectFiles] = useState<ProjectFileMeta[]>([]);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [notes, setNotes] = useState("");
+  const notesTimer = useRef<number | null>(null);
+
+  const [activity, setActivity] = useState<string[]>([]);
+  const [activityOpen, setActivityOpen] = useState(false);
+
+  const [editingItem, setEditingItem] = useState<EditingItem | null>(null);
+  const [editingValue, setEditingValue] = useState("");
+  const editInputRef = useRef<HTMLInputElement | null>(null);
+  const [scopeExpanded, setScopeExpanded] = useState(true);
+  const [missingOpen, setMissingOpen] = useState(false);
+
+  const attributionRef = useRef<Record<string, "AI" | "User">>({});
+
+  // Simple mock understanding generator
+  const generateMockUnderstanding = (files: ProjectFileMeta[]): ProjectUnderstanding => {
+    const images = files.filter((f) => f.type.startsWith("image/") || /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(f.filename));
+    const count = files.length;
+    if (count === 0) {
+      return {
+        projectType: "",
+        confidence: 0,
+        detectedFiles: [],
+        possibleRooms: [],
+        detectedScope: [],
+        missingInformation: [],
+      };
+    }
+
+    const detectedFiles = [`${count} file${count === 1 ? "" : "s"}`];
+
+    if (images.length >= 1) {
+      return {
+        projectType: "Bathroom tile work",
+        confidence: 72,
+        detectedFiles,
+        possibleRooms: ["Bathroom tub surround"],
+        detectedScope: ["Demolition", "Waterproofing", "Wall Tile", "Tile Trim"],
+        missingInformation: [
+          "Is the bathtub staying?",
+          "Confirm wall dimensions",
+          "Confirm selected tile and trim",
+        ],
+      };
+    }
+
+    return {
+      projectType: "General renovation",
+      confidence: 60,
+      detectedFiles,
+      possibleRooms: [],
+      detectedScope: [],
+      missingInformation: [],
+    };
+  };
+
+  const aiUnderstanding = useMemo(() => generateMockUnderstanding(projectFiles), [projectFiles]);
+  const [userUnderstanding, setUserUnderstanding] = useState<Partial<ProjectUnderstanding>>({});
+  const understanding = useMemo(() => ({
+    projectType: userUnderstanding.projectType ?? aiUnderstanding.projectType,
+    confidence: aiUnderstanding.confidence,
+    detectedFiles: aiUnderstanding.detectedFiles,
+    possibleRooms: userUnderstanding.possibleRooms ?? aiUnderstanding.possibleRooms,
+    detectedScope: userUnderstanding.detectedScope ?? aiUnderstanding.detectedScope,
+    missingInformation: userUnderstanding.missingInformation ?? aiUnderstanding.missingInformation,
+  }), [aiUnderstanding, userUnderstanding]);
+
+  // Load persisted data
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(storageKey);
-      if (raw) {
-        const parsed = JSON.parse(raw) as Partial<ProjectUnderstanding>;
-        setUserUnderstanding(parsed);
-      }
-    } catch (e) {
-      // ignore parse errors
-      // console.warn("Failed to load project understanding from localStorage", e);
-    }
-
-    try {
       const rawFiles = localStorage.getItem(fileStorageKey);
-      if (rawFiles) {
-        const parsedFiles = JSON.parse(rawFiles) as ProjectFileMeta[];
-        setProjectFiles(parsedFiles);
-      }
-    } catch (e) {
-      // ignore parse errors
-    }
-
+      if (rawFiles) setProjectFiles(JSON.parse(rawFiles));
+    } catch {}
     try {
       const rawTitle = localStorage.getItem(titleStorageKey);
       if (rawTitle) {
         setProjectTitle(rawTitle);
         setTitleDraft(rawTitle);
-        setHasSelectedTitle(true);
-        setShowNameSuggestions(false);
       }
-    } catch (e) {
-      // ignore parse errors
-    }
-  }, [storageKey, fileStorageKey, titleStorageKey]);
+    } catch {}
+    try {
+      const rawNotes = localStorage.getItem(notesStorageKey);
+      if (rawNotes) setNotes(rawNotes);
+    } catch {}
+    try {
+      const rawActivity = localStorage.getItem(activityStorageKey);
+      if (rawActivity) setActivity(JSON.parse(rawActivity));
+    } catch {}
+    try {
+      const rawAttr = localStorage.getItem(attrStorageKey);
+      if (rawAttr) attributionRef.current = JSON.parse(rawAttr);
+    } catch {}
+    try {
+      const rawUser = localStorage.getItem(storageKey);
+      if (rawUser) setUserUnderstanding(JSON.parse(rawUser));
+    } catch {}
+  }, [fileStorageKey, titleStorageKey, notesStorageKey, activityStorageKey, attrStorageKey, storageKey]);
 
-  useEffect(() => {
-    if (projectFiles.length > 0 && !hasSelectedTitle) {
-      setShowNameSuggestions(true);
-    }
-  }, [projectFiles.length, hasSelectedTitle]);
+  const persistFiles = (files: ProjectFileMeta[]) => {
+    setProjectFiles(files);
+    try { localStorage.setItem(fileStorageKey, JSON.stringify(files)); } catch {}
+  };
 
+  const pushActivity = (text: string) => {
+    const entry = `${text} — ${new Date().toLocaleString()}`;
+    setActivity((current) => {
+      const next = [...current, entry];
+      try { localStorage.setItem(activityStorageKey, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+
+  // Title editing
   useEffect(() => {
     setTitleDraft(projectTitle);
   }, [projectTitle]);
-
-  useEffect(() => {
-    if (!isEditingUnderstanding) return;
-
-    const originalOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-
-    return () => {
-      document.body.style.overflow = originalOverflow;
-    };
-  }, [isEditingUnderstanding]);
-
-  const understanding = useMemo(
-    () => mergeUnderstanding(aiUnderstanding, userUnderstanding),
-    [aiUnderstanding, userUnderstanding],
-  );
-
-  useEffect(() => {
-    if (!isUploading) {
-      setUploadDots(".");
-      return;
-    }
-
-    const interval = window.setInterval(() => {
-      setUploadDots((current) => (current.length === 3 ? "." : `${current}.`));
-    }, 400);
-
-    return () => window.clearInterval(interval);
-  }, [isUploading]);
-
-  useEffect(() => {
-    if (!uploadSuccess) return;
-
-    const timeout = window.setTimeout(() => {
-      setUploadSuccess(false);
-    }, 3000);
-
-    return () => window.clearTimeout(timeout);
-  }, [uploadSuccess]);
-
-  const projectNameSuggestions = useMemo(
-    () => generateMockProjectNameSuggestions(projectFiles, projectName),
-    [projectFiles, projectName],
-  );
-
-  const activityMessage = useMemo(() => {
-    const fileCount = projectFiles.length;
-    if (fileCount === 0) return null;
-    return `${fileCount} file${fileCount === 1 ? "" : "s"} added`;
-  }, [projectFiles]);
-
-  const saveTitleDraft = (draft: string) => {
-    const nextTitle = draft.trim() || projectName;
-    setProjectTitle(nextTitle);
-    setTitleDraft(nextTitle);
-    setIsEditingTitle(false);
-    setHasSelectedTitle(true);
-    setShowNameSuggestions(false);
-    try {
-      localStorage.setItem(titleStorageKey, nextTitle);
-    } catch (e) {
-      // ignore storage errors
-    }
-  };
-
-  const cancelTitleEdit = () => {
-    setTitleDraft(projectTitle);
-    setIsEditingTitle(false);
-  };
-
-  const selectProjectTitle = (suggestedTitle: string) => {
-    saveTitleDraft(suggestedTitle);
-  };
-
-  const handleSuggestNames = () => {
-    setShowNameSuggestions((current) => !current);
-  };
-
-  const startTitleEdit = () => {
-    previousTitleRef.current = projectTitle;
-    setTitleDraft(projectTitle);
-    setIsEditingTitle(true);
-    setShowNameSuggestions(false);
-  };
-
-  const handleTitleInputBlur = () => {
-    if (isEditingTitle) {
-      saveTitleDraft(titleDraft);
-    }
-  };
 
   useEffect(() => {
     if (isEditingTitle) {
@@ -351,1544 +167,296 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     }
   }, [isEditingTitle]);
 
-  const handleTitleInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "Enter") {
-      saveTitleDraft(titleDraft);
+  const saveTitle = (next: string) => {
+    const t = next.trim() || projectName;
+    setProjectTitle(t);
+    setTitleDraft(t);
+    setIsEditingTitle(false);
+    try { localStorage.setItem(titleStorageKey, t); } catch {}
+    pushActivity('Title changed');
+  };
+  const cancelTitle = () => { setTitleDraft(projectTitle); setIsEditingTitle(false); };
+
+  const getAttrKey = (field: EditingField, index?: number) => index !== undefined ? `${field}:${index}` : field;
+  const getAttribution = (field: EditingField, index: number) => attributionRef.current[getAttrKey(field, index)] ?? 'AI';
+  const setItemAttribution = (field: EditingField, index: number, value: 'AI' | 'User') => {
+    attributionRef.current = { ...attributionRef.current, [getAttrKey(field, index)]: value };
+    try { localStorage.setItem(attrStorageKey, JSON.stringify(attributionRef.current)); } catch {}
+  };
+  const clearAttribution = () => {
+    attributionRef.current = {};
+    try { localStorage.removeItem(attrStorageKey); } catch {}
+  };
+
+  const persistUnderstanding = (next: Partial<ProjectUnderstanding>) => {
+    setUserUnderstanding(next);
+    try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch {}
+  };
+
+  const beginEdit = (field: EditingField, index: number) => {
+    const currentValue = field === 'projectType'
+      ? understanding.projectType
+      : (understanding as any)[field]?.[index] ?? '';
+
+    setEditingItem({ field, index });
+    setEditingValue(currentValue);
+  };
+
+  const cancelUnderstandingEdit = () => {
+    setEditingItem(null);
+    setEditingValue('');
+  };
+
+  const saveUnderstandingEdit = () => {
+    if (!editingItem) return;
+    const value = editingValue.trim();
+    if (value === '') return cancelUnderstandingEdit();
+
+    if (editingItem.field === 'projectType') {
+      persistUnderstanding({ ...userUnderstanding, projectType: value });
+    } else {
+      const currentArray = ((userUnderstanding as any)[editingItem.field] ?? (aiUnderstanding as any)[editingItem.field] ?? []) as string[];
+      const nextArray = [...currentArray];
+      nextArray[editingItem.index] = value;
+      persistUnderstanding({ ...userUnderstanding, [editingItem.field]: nextArray });
     }
-    if (event.key === "Escape") {
-      cancelTitleEdit();
+
+    setItemAttribution(editingItem.field, editingItem.index, 'User');
+    pushActivity('Project understanding item edited');
+    setEditingItem(null);
+    setEditingValue('');
+  };
+
+  useEffect(() => {
+    if (editingItem) {
+      editInputRef.current?.focus();
+      editInputRef.current?.select();
     }
-  };
+  }, [editingItem]);
 
-  const openReviewEdit = () => {
-    setEditingUnderstanding(understanding);
-    setIsEditingUnderstanding(true);
-  };
+  // Files upload/delete
+  const openFilePicker = () => fileInputRef.current?.click();
 
-  const closeReviewEdit = () => {
-    setIsEditingUnderstanding(false);
-  };
-
-  const updateEditingField = (
-    field: keyof ProjectUnderstanding,
-    value: string | string[],
-  ) => {
-    setEditingUnderstanding((current) => ({
-      ...current,
-      [field]: value,
-    }));
-  };
-
-  const updateListItem = (
-    field: keyof Pick<
-      ProjectUnderstanding,
-      "possibleRooms" | "detectedScope" | "missingInformation"
-    >,
-    index: number,
-    value: string,
-  ) => {
-    setEditingUnderstanding((current) => {
-      const list = [...current[field]];
-      list[index] = value;
-      return { ...current, [field]: list };
-    });
-  };
-
-  const addListItem = (
-    field: keyof Pick<
-      ProjectUnderstanding,
-      "possibleRooms" | "detectedScope" | "missingInformation"
-    >,
-  ) => {
-    setEditingUnderstanding((current) => ({
-      ...current,
-      [field]: [...current[field], ""],
-    }));
-  };
-
-  const removeListItem = (
-    field: keyof Pick<
-      ProjectUnderstanding,
-      "possibleRooms" | "detectedScope" | "missingInformation"
-    >,
-    index: number,
-  ) => {
-    setEditingUnderstanding((current) => {
-      const list = current[field].filter((_, idx) => idx !== index);
-      return { ...current, [field]: list };
-    });
-  };
-
-  const saveUnderstandingEdits = () => {
-    const newUserEdits: Partial<ProjectUnderstanding> = {
-      projectType: editingUnderstanding.projectType,
-      possibleRooms: editingUnderstanding.possibleRooms,
-      detectedScope: editingUnderstanding.detectedScope,
-      missingInformation: editingUnderstanding.missingInformation,
-    };
-
-    setUserUnderstanding(newUserEdits);
+  const handleFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const form = new FormData();
+    Array.from(files).forEach((f) => form.append('files', f));
     try {
-      localStorage.setItem(storageKey, JSON.stringify(newUserEdits));
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectName)}/files`, { method: 'POST', body: form });
+      const data = await res.json();
+      const newFiles = (data.files ?? []).map((f: any) => ({ id: `${f.name}-${f.size}-${Date.now()}`, filename: f.name, type: f.type, size: f.size, uploadedAt: new Date().toISOString() }));
+      persistFiles([...(projectFiles ?? []), ...newFiles]);
+      pushActivity(`${newFiles.length} file${newFiles.length===1? '':'s'} uploaded`);
     } catch (e) {
-      // ignore storage errors
-    }
-
-    setIsEditingUnderstanding(false);
-  };
-
-  const resetToAISuggestion = () => {
-    // Restore the editing view to AI suggestion and remove saved user edits
-    setEditingUnderstanding(aiUnderstanding);
-    setUserUnderstanding({});
-    try {
-      localStorage.removeItem(storageKey);
-    } catch (e) {
-      // ignore
+      // fallback: add locally
+      const localFiles = Array.from(files).map((f) => ({ id: `${f.name}-${f.size}-${Date.now()}`, filename: f.name, type: f.type, size: f.size, uploadedAt: new Date().toISOString() }));
+      persistFiles([...(projectFiles ?? []), ...localFiles]);
+      pushActivity(`${localFiles.length} file${localFiles.length===1? '':'s'} added (local)`);
     }
   };
 
-  const handleFiles = async (selectedFiles: FileList | null) => {
-    if (!selectedFiles?.length) return;
-
-    setUploadError(null);
-    setUploadSuccess(false);
-    setIsUploading(true);
-
-    try {
-      const formData = new FormData();
-
-      Array.from(selectedFiles).forEach((file) => {
-        formData.append("files", file);
-      });
-
-      const response = await fetch(
-        `/api/projects/${encodeURIComponent(projectName)}/files`,
-        {
-          method: "POST",
-          body: formData,
-        },
-      );
-
-      const data: UploadResponse = await response.json();
-
-      if (!response.ok || !data.success) {
-        throw new Error(data.message || "Upload failed.");
-      }
-
-      setFiles((current) => [...current, ...(data.files ?? [])]);
-
-      const newProjectFiles = (data.files ?? []).map((file) => ({
-        id: `${file.name}-${file.size}-${Date.now()}`,
-        filename: file.name,
-        type: file.type,
-        size: file.size,
-        uploadedAt: new Date().toISOString(),
-      }));
-
-      setProjectFiles((current) => {
-        const nextFiles = [...current, ...newProjectFiles];
-        try {
-          localStorage.setItem(fileStorageKey, JSON.stringify(nextFiles));
-        } catch (e) {
-          // ignore storage errors
-        }
-        return nextFiles;
-      });
-
-      setUploadSuccess(true);
-
-      setActivity((current) => [
-        ...current.filter((item) => item !== activityMessage),
-        `${data.files?.length ?? 0} file${
-          data.files?.length === 1 ? "" : "s"
-        } added`,
-      ]);
-    } catch (error) {
-      setUploadError(
-        error instanceof Error ? error.message : "The upload failed.",
-      );
-    } finally {
-      setIsUploading(false);
-      setDragActive(false);
-    }
+  const deleteFile = (id: string) => {
+    const next = projectFiles.filter((f) => f.id !== id);
+    persistFiles(next);
+    pushActivity('File deleted');
   };
 
-  const deleteProjectFile = (fileId: string) => {
-    setProjectFiles((current) => {
-      const nextFiles = current.filter((file) => file.id !== fileId);
-      try {
-        localStorage.setItem(fileStorageKey, JSON.stringify(nextFiles));
-      } catch (e) {
-        // ignore storage errors
-      }
-      return nextFiles;
-    });
+  // Notes debounce
+  const saveNotesNow = (value: string) => {
+    try { localStorage.setItem(notesStorageKey, value); } catch {}
+    pushActivity('Note updated');
+  };
+  const handleNotesChange = (v: string) => {
+    setNotes(v);
+    if (notesTimer.current) window.clearTimeout(notesTimer.current);
+    notesTimer.current = window.setTimeout(() => { saveNotesNow(v); notesTimer.current = null; }, 400) as unknown as number;
   };
 
-  const onDrop = (event: React.DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-    setDragActive(false);
-    handleFiles(event.dataTransfer.files);
-  };
-
-  const onDragOver = (event: React.DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-    setDragActive(true);
-  };
-
-  const onDragLeave = (event: React.DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-    setDragActive(false);
-  };
-
-  const openFilePicker = () => {
-    fileInputRef.current?.click();
-  };
+  const [showEstimate, setShowEstimate] = useState(false);
 
   return (
-    <main
-      style={{
-        minHeight: "100vh",
-        background: "#f4efe5",
-        color: "#2f2a24",
-        padding: "40px 24px",
-        fontFamily: "Arial, sans-serif",
-      }}
-    >
-      <div
-        style={{
-          width: "100%",
-          maxWidth: "900px",
-          margin: "0 auto",
-        }}
-      >
-        <Link
-          href="/"
-          style={{
-            display: "inline-block",
-            marginBottom: "30px",
-            color: "#766b5d",
-            textDecoration: "none",
-          }}
-        >
-          ← Back to Workspace
-        </Link>
+    <main style={{ minHeight: '100vh', background: '#f4efe5', color: '#2f2a24', padding: '28px', fontFamily: 'Arial, sans-serif' }}>
+      <div style={{ width: '100%', maxWidth: 900, margin: '0 auto' }}>
+        <Link href="/" style={{ display: 'inline-block', marginBottom: 18, color: '#766b5d', textDecoration: 'none' }}>← Back to Workspace</Link>
 
-        <header
-          style={{
-            marginBottom: "40px",
-          }}
-        >
-          <p
-            style={{
-              margin: "0 0 8px",
-              color: "#766b5d",
-              fontSize: "14px",
-            }}
-          >
-            Dimcan Project
-          </p>
+        <header style={{ marginBottom: 18 }}>
+          <p style={{ margin: 0, color: '#766b5d', fontSize: 14 }}>Dimcan Project</p>
+          {isEditingTitle ? (
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 8 }}>
+              <input ref={titleInputRef} value={titleDraft} onChange={(e) => setTitleDraft(e.target.value)} onKeyDown={(e)=>{ if (e.key==='Enter') saveTitle(titleDraft); if (e.key==='Escape') cancelTitle(); }} onBlur={() => saveTitle(titleDraft)} style={{ fontSize: 28, fontWeight: 700, padding: '8px 12px', borderRadius: 10, border: '1px solid #d8cdbc' }} />
+            </div>
+          ) : (
+            <h1 onClick={() => setIsEditingTitle(true)} style={{ margin: '8px 0 0', fontSize: 32, fontWeight: 700, cursor: 'pointer' }}>{projectTitle}</h1>
+          )}
+        </header>
 
-            {isEditingTitle ? (
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "12px",
-                  flexWrap: "wrap",
-                  marginBottom: "14px",
-                }}
-              >
-                <input
-                  ref={titleInputRef}
-                  value={titleDraft}
-                  onChange={(event) => setTitleDraft(event.target.value)}
-                  onKeyDown={handleTitleInputKeyDown}
-                  onBlur={handleTitleInputBlur}
-                  aria-label="Edit project title"
-                  style={{
-                    fontSize: "38px",
-                    fontWeight: 600,
-                    border: "1px solid #d8cdbc",
-                    borderRadius: "14px",
-                    padding: "12px 16px",
-                    width: "100%",
-                    maxWidth: "560px",
-                    outline: "none",
-                  }}
-                />
-                <button
-                  type="button"
-                  onClick={() => saveTitleDraft(titleDraft)}
-                  style={{
-                    border: "1px solid #d8cdbc",
-                    borderRadius: "12px",
-                    padding: "12px 18px",
-                    background: "#fffaf2",
-                    color: "#2f2a24",
-                    cursor: "pointer",
-                    fontSize: "14px",
-                    fontWeight: 700,
-                  }}
-                >
-                  Save
-                </button>
-                <button
-                  type="button"
-                  onClick={cancelTitleEdit}
-                  style={{
-                    border: "1px solid transparent",
-                    borderRadius: "12px",
-                    padding: "12px 18px",
-                    background: "transparent",
-                    color: "#766b5d",
-                    cursor: "pointer",
-                    fontSize: "14px",
-                    fontWeight: 700,
-                  }}
-                >
-                  Cancel
-                </button>
-              </div>
-            ) : (
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "16px",
-                  flexWrap: "wrap",
-                  marginBottom: "14px",
-                }}
-              >
-                <h1
-                  style={{
-                    margin: 0,
-                    fontSize: "38px",
-                    fontWeight: 600,
-                    cursor: "pointer",
-                  }}
-                  onClick={startTitleEdit}
-                >
-                  {projectTitle}
-                </h1>
-                <button
-                  type="button"
-                  onClick={startTitleEdit}
-                  style={{
-                    border: "1px solid #d8cdbc",
-                    borderRadius: "12px",
-                    padding: "12px 18px",
-                    background: "#fffaf2",
-                    color: "#2f2a24",
-                    cursor: "pointer",
-                    fontSize: "14px",
-                    fontWeight: 700,
-                  }}
-                >
-                  Edit title
-                </button>
-              </div>
-            )}
-
-            {projectNameSuggestions.length > 0 && (
-              <button
-                type="button"
-                onClick={handleSuggestNames}
-                style={{
-                  border: "1px solid #d8cdbc",
-                  borderRadius: "12px",
-                  padding: "10px 16px",
-                  background: "#fffaf2",
-                  color: "#2f2a24",
-                  cursor: "pointer",
-                  fontSize: "14px",
-                  fontWeight: 700,
-                }}
-              >
-                {showNameSuggestions ? "Hide suggestions" : "Suggest names"}
-              </button>
-            )}
-          </header>
-
-          <section
-            style={{
-              background: "#fffaf2",
-              border: "1px solid #d8cdbc",
-              borderRadius: "18px",
-              padding: "60px 30px",
-              marginBottom: "36px",
-              boxShadow: "0 12px 30px rgba(75, 62, 47, 0.06)",
-            }}
-          >
-            <div
-              onDragOver={onDragOver}
-              onDragLeave={onDragLeave}
-              onDrop={onDrop}
-              onClick={openFilePicker}
-              onMouseEnter={() => setHoverActive(true)}
-              onMouseLeave={() => setHoverActive(false)}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  openFilePicker();
-                }
-              }}
-              style={{
-                border: dragActive
-                  ? "2px dashed #594f43"
-                  : hoverActive
-                  ? "2px dashed #b49c7f"
-                  : "2px dashed #d8cdbc",
-                borderRadius: "18px",
-                padding: "60px 30px",
-                background: dragActive
-                  ? "#efe4d2"
-                  : hoverActive
-                  ? "#f7ead6"
-                  : "#f8f1e5",
-                maxWidth: "680px",
-                margin: "0 auto",
-                cursor: "pointer",
-                transition:
-                  "background 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease",
-                boxShadow: dragActive
-                  ? "0 18px 36px rgba(75, 62, 47, 0.12)"
-                  : hoverActive
-                  ? "0 14px 30px rgba(75, 62, 47, 0.1)"
-                  : "none",
-              }}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                hidden
-                onChange={(event) => handleFiles(event.target.files)}
-            />
-
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "center",
-                marginBottom: "20px",
-              }}
-            >
-              <svg
-                width="40"
-                height="40"
-                viewBox="0 0 24 24"
-                fill="none"
-                xmlns="http://www.w3.org/2000/svg"
-                style={{ display: "block" }}
-              >
-                <path
-                  d="M16.59 9.17L13 5.58V15H11V5.58L7.41 9.17L6 7.75L12 1.75L18 7.75L16.59 9.17ZM6 18V20H18V18H6Z"
-                  fill="#594f43"
-                />
-              </svg>
+        <section style={{ background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+          <h2 style={{ margin: '0 0 12px', fontSize: 18, fontWeight: 700 }}>Project Files</h2>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+            <div onClick={openFilePicker} role="button" tabIndex={0} style={{ padding: '10px 20px', border: '2px dashed #d8cdbc', borderRadius: 10, background: '#f8f1e5', cursor: 'pointer' }} onKeyDown={(e)=>{ if (e.key==='Enter') openFilePicker(); }}>
+              <input ref={fileInputRef} type="file" multiple hidden onChange={(e)=>handleFiles(e.target.files)} />
+              <div style={{ fontSize: 18, fontWeight: 700 }}>Upload or drag files</div>
             </div>
 
-            <p
-              style={{
-                margin: 0,
-                fontSize: "24px",
-                fontWeight: 600,
-                color: "#2f2a24",
-              }}
-            >
-              Upload or drag files here
-            </p>
-
-            <p
-              style={{
-                margin: "14px 0 0",
-                color: "#766b5d",
-                fontSize: "16px",
-                lineHeight: 1.7,
-              }}
-            >
-              Click to browse your computer or drag files into this area.
-            </p>
-
-            <p
-              style={{
-                margin: "14px 0 0",
-                color: "#766b5d",
-                fontSize: "14px",
-                lineHeight: 1.75,
-              }}
-            >
-              Drawings • PDFs • Photos • Videos • Emails • Invoices • Specifications
-            </p>
-
-            {isUploading && (
-              <p
-                style={{
-                  marginTop: "24px",
-                  color: "#594f43",
-                  fontSize: "15px",
-                  fontWeight: 600,
-                }}
-              >
-                Uploading files{uploadDots}
-              </p>
-            )}
-
-            {uploadSuccess && !isUploading && (
-              <p
-                style={{
-                  marginTop: "24px",
-                  color: "#375a36",
-                  fontSize: "15px",
-                  fontWeight: 600,
-                }}
-              >
-                ✓ Files uploaded successfully
-              </p>
-            )}
-          </div>
-        </section>
-
-        {projectFiles.length > 0 && (
-          <>
-            <section
-              style={{
-                background: "#fffaf2",
-                border: "1px solid #d8cdbc",
-                borderRadius: "18px",
-                padding: "32px",
-                marginBottom: "36px",
-                boxShadow: "0 12px 30px rgba(75, 62, 47, 0.06)",
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "flex-start",
-                  gap: "20px",
-                  flexWrap: "wrap",
-                }}
-              >
-                <div>
-                  <p
-                    style={{
-                      margin: 0,
-                      color: "#766b5d",
-                      fontSize: "14px",
-                    }}
-                  >
-                    Project Documents
-                  </p>
-                  <h2
-                    style={{
-                      margin: "8px 0 0",
-                      fontSize: "28px",
-                      fontWeight: 700,
-                      color: "#2f2a24",
-                    }}
-                  >
-                    Document library
-                  </h2>
-                </div>
-              </div>
-
-              <div
-                style={{
-                  display: "grid",
-                  gap: "14px",
-                  marginTop: "28px",
-                }}
-              >
-                {projectFiles.map((file) => {
-                  const category = getFileCategory(file.type, file.filename);
-                  return (
-                    <div
-                      key={file.id}
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "auto 1fr auto",
-                        gap: "16px",
-                        alignItems: "center",
-                        background: "#f8f1e5",
-                        border: "1px solid #d8cdbc",
-                        borderRadius: "14px",
-                        padding: "18px 20px",
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: "44px",
-                          height: "44px",
-                          borderRadius: "14px",
-                          background: "#fff",
-                          display: "grid",
-                          placeItems: "center",
-                          fontSize: "20px",
-                        }}
-                      >
-                        {getFileIcon(category)}
+            <div style={{ width: '100%', marginTop: 12 }}>
+              {projectFiles.length === 0 ? (
+                <p style={{ margin: 0, color: '#766b5d' }}>No files uploaded</p>
+              ) : (
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {projectFiles.map((f) => (
+                    <div key={f.id} style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#fff', padding: 8, borderRadius: 8, border: '1px solid #e6dac8' }}>
+                      <div style={{ width: 36, height: 36, borderRadius: 8, background: '#f8f1e5', display: 'grid', placeItems: 'center' }}>{f.type.startsWith('image/') ? '🖼️' : '📄'}</div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                          <div style={{ fontWeight: 700 }}>{f.filename}</div>
+                          <div style={{ color: '#766b5d', fontSize: 13 }}>{f.size ? `${(f.size/1000).toFixed(1)} KB` : f.type}</div>
+                        </div>
+                        <div style={{ color: '#9a8f80', fontSize: 12 }}>{new Date(f.uploadedAt).toLocaleString()}</div>
                       </div>
-                      <div
-                        style={{
-                          display: "grid",
-                          gap: "4px",
-                        }}
-                      >
-                        <p
-                          style={{
-                            margin: 0,
-                            fontSize: "15px",
-                            fontWeight: 700,
-                            color: "#2f2a24",
-                          }}
-                        >
-                          {file.filename}
-                        </p>
-                        <p
-                          style={{
-                            margin: 0,
-                            color: "#766b5d",
-                            fontSize: "14px",
-                          }}
-                        >
-                          {formatFileSize(file.size)} • {formatDateTime(file.uploadedAt)}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => deleteProjectFile(file.id)}
-                        style={{
-                          border: "1px solid #d8cdbc",
-                          borderRadius: "12px",
-                          padding: "10px 14px",
-                          background: "#fffaf2",
-                          color: "#2f2a24",
-                          cursor: "pointer",
-                          fontSize: "14px",
-                          fontWeight: 700,
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
-
-            {projectNameSuggestions.length > 0 && showNameSuggestions && (
-              <section
-                style={{
-                  background: "#fffaf2",
-                  border: "1px solid #d8cdbc",
-                  borderRadius: "18px",
-                  padding: "28px 32px",
-                  marginBottom: "36px",
-                  boxShadow: "0 12px 30px rgba(75, 62, 47, 0.06)",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: "12px",
-                    flexWrap: "wrap",
-                    marginBottom: "22px",
-                  }}
-                >
-                  <div>
-                    <p
-                      style={{
-                        margin: 0,
-                        color: "#766b5d",
-                        fontSize: "14px",
-                      }}
-                    >
-                      AI suggestion
-                    </p>
-                    <h2
-                      style={{
-                        margin: "8px 0 0",
-                        fontSize: "24px",
-                        fontWeight: 700,
-                        color: "#2f2a24",
-                      }}
-                    >
-                      Suggested project names
-                    </h2>
-                  </div>
-                </div>
-
-                <div style={{ display: "grid", gap: "14px" }}>
-                  {projectNameSuggestions.map((suggestion) => (
-                    <div
-                      key={suggestion}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        gap: "16px",
-                        background: "#f8f1e5",
-                        border: "1px solid #d8cdbc",
-                        borderRadius: "14px",
-                        padding: "18px 20px",
-                      }}
-                    >
-                      <p
-                        style={{
-                          margin: 0,
-                          color: "#2f2a24",
-                          fontSize: "15px",
-                          fontWeight: 700,
-                        }}
-                      >
-                        {suggestion}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => selectProjectTitle(suggestion)}
-                        style={{
-                          border: "1px solid #d8cdbc",
-                          borderRadius: "12px",
-                          padding: "10px 16px",
-                          background: "#fffaf2",
-                          color: "#2f2a24",
-                          cursor: "pointer",
-                          fontSize: "14px",
-                          fontWeight: 700,
-                        }}
-                      >
-                        Use this name
-                      </button>
+                      <button onClick={() => deleteFile(f.id)} style={{ border: '1px solid #d8cdbc', background: '#fffaf2', padding: '6px 10px', borderRadius: 8, cursor: 'pointer' }}>Delete</button>
                     </div>
                   ))}
                 </div>
-              </section>
-            )}
-          </>
-        )}
-
-        <section>
-          <h2
-            style={{
-              marginBottom: "18px",
-              fontSize: "24px",
-              fontWeight: 600,
-            }}
-          >
-            Activity
-          </h2>
-
-          <div
-            style={{
-              display: "grid",
-              gap: "18px",
-              marginBottom: "28px",
-            }}
-          >
-            {activity.map((item) => (
-              <div
-                key={item}
-                style={{
-                  background: "#fffaf2",
-                  border: "1px solid #d8cdbc",
-                  borderRadius: "14px",
-                  padding: "22px 24px",
-                }}
-              >
-                <p
-                  style={{
-                    margin: 0,
-                    fontSize: "16px",
-                    color: "#2f2a24",
-                    fontWeight: 600,
-                  }}
-                >
-                  {item}
-                </p>
-              </div>
-            ))}
-          </div>
-
-          {uploadError && (
-            <div
-              style={{
-                background: "#fee8e3",
-                border: "1px solid #d8ab9d",
-                borderRadius: "14px",
-                padding: "18px 22px",
-              }}
-            >
-              <p
-                style={{
-                  margin: 0,
-                  color: "#9a3f32",
-                  fontSize: "15px",
-                }}
-              >
-                {uploadError}
-              </p>
+              )}
             </div>
-          )}
+          </div>
         </section>
 
-        {projectFiles.length > 0 && (
-          <section
-            style={{
-              background: "#fffaf2",
-              border: "1px solid #d8cdbc",
-              borderRadius: "18px",
-              padding: "32px",
-              marginBottom: "36px",
-              boxShadow: "0 12px 30px rgba(75, 62, 47, 0.06)",
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                gap: "20px",
-                flexWrap: "wrap",
-                alignItems: "flex-start",
-              }}
-            >
-              <div>
-                <p
-                  style={{
-                    margin: 0,
-                    color: "#766b5d",
-                    fontSize: "14px",
-                  }}
-                >
-                  Project Understanding
-                </p>
-                <h2
-                  style={{
-                    margin: "8px 0 0",
-                    fontSize: "28px",
-                    fontWeight: 700,
-                    color: "#2f2a24",
-                  }}
-                >
-                  Project Understanding
-                </h2>
-              </div>
+        <section style={{ marginBottom: 16 }}>
+          <h2 style={{ margin: '0 0 8px', fontSize: 18, fontWeight: 700 }}>Notes</h2>
+          <textarea value={notes} onChange={(e)=>handleNotesChange(e.target.value)} placeholder="Add project notes, client instructions, site details or observations..." style={{ width: '100%', minHeight: 120, padding: 12, borderRadius: 8, border: '1px solid #d8cdbc' }} />
+        </section>
 
-              <div
-                style={{
-                  background: "#f8f1e5",
-                  border: "1px solid #d8cdbc",
-                  borderRadius: "14px",
-                  padding: "16px 20px",
-                  minWidth: "180px",
-                }}
-              >
-                <p
-                  style={{
-                    margin: 0,
-                    fontSize: "14px",
-                    color: "#766b5d",
-                  }}
-                >
-                  Project type
-                </p>
-                <p
-                  style={{
-                    margin: "6px 0 0",
-                    fontSize: "18px",
-                    fontWeight: 700,
-                    color: "#2f2a24",
-                  }}
-                >
-                  {understanding.projectType}
-                </p>
-                <p
-                  style={{
-                    margin: "16px 0 0",
-                    fontSize: "14px",
-                    color: "#766b5d",
-                  }}
-                >
-                  Confidence
-                </p>
-                <p
-                  style={{
-                    margin: "6px 0 0",
-                    fontSize: "18px",
-                    fontWeight: 700,
-                    color: "#2f2a24",
-                  }}
-                >
-                  {understanding.confidence}%
-                </p>
-              </div>
+        <section style={{ marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Project Understanding</h2>
+            <div style={{ color: '#766b5d', fontWeight: 700 }}>Confidence: {understanding.confidence}%</div>
+          </div>
+
+          <div style={{ marginTop: 12, display: 'grid', gap: 12 }}>
+            <div style={{ background: '#fff', border: '1px solid #e6dac8', padding: 12, borderRadius: 8 }}>
+              <div style={{ fontWeight: 700 }}>Detected files</div>
+              <div style={{ color: '#766b5d', marginTop: 6 }}>{understanding.detectedFiles.join(', ')}</div>
             </div>
 
-            <div
-              style={{
-                display: "grid",
-                gap: "22px",
-                marginTop: "28px",
-              }}
-            >
-              <div
-                style={{
-                  display: "grid",
-                  gap: "14px",
-                }}
-              >
-                <div
-                  style={{
-                    display: "grid",
-                    gap: "8px",
-                    background: "#f8f1e5",
-                    border: "1px solid #d8cdbc",
-                    borderRadius: "14px",
-                    padding: "20px",
-                  }}
-                >
-                  <p
-                    style={{
-                      margin: 0,
-                      fontSize: "15px",
-                      fontWeight: 700,
-                      color: "#2f2a24",
-                    }}
-                  >
-                    Detected files
-                  </p>
-                  <ul
-                    style={{
-                      margin: 0,
-                      paddingLeft: "18px",
-                      color: "#766b5d",
-                      fontSize: "14px",
-                      lineHeight: 1.8,
-                    }}
-                  >
-                    {understanding.detectedFiles.map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
-                </div>
-
-                <div
-                  style={{
-                    display: "grid",
-                    gap: "8px",
-                    background: "#f8f1e5",
-                    border: "1px solid #d8cdbc",
-                    borderRadius: "14px",
-                    padding: "20px",
-                  }}
-                >
-                  <p
-                    style={{
-                      margin: 0,
-                      fontSize: "15px",
-                      fontWeight: 700,
-                      color: "#2f2a24",
-                    }}
-                  >
-                    Possible rooms
-                  </p>
-                  <ul
-                    style={{
-                      margin: 0,
-                      paddingLeft: "18px",
-                      color: "#766b5d",
-                      fontSize: "14px",
-                      lineHeight: 1.8,
-                    }}
-                  >
-                    {understanding.possibleRooms.map((room) => (
-                      <li key={room}>{room}</li>
-                    ))}
-                  </ul>
-                </div>
-
-                <div
-                  style={{
-                    display: "grid",
-                    gap: "8px",
-                    background: "#f8f1e5",
-                    border: "1px solid #d8cdbc",
-                    borderRadius: "14px",
-                    padding: "20px",
-                  }}
-                >
-                  <p
-                    style={{
-                      margin: 0,
-                      fontSize: "15px",
-                      fontWeight: 700,
-                      color: "#2f2a24",
-                    }}
-                  >
-                    Detected scope
-                  </p>
-                  <ul
-                    style={{
-                      margin: 0,
-                      paddingLeft: "18px",
-                      color: "#766b5d",
-                      fontSize: "14px",
-                      lineHeight: 1.8,
-                    }}
-                  >
-                    {understanding.detectedScope.map((scope) => (
-                      <li key={scope}>{scope}</li>
-                    ))}
-                  </ul>
-                </div>
-
-                <div
-                  style={{
-                    display: "grid",
-                    gap: "8px",
-                    background: "#f8f1e5",
-                    border: "1px solid #d8cdbc",
-                    borderRadius: "14px",
-                    padding: "20px",
-                  }}
-                >
-                  <p
-                    style={{
-                      margin: 0,
-                      fontSize: "15px",
-                      fontWeight: 700,
-                      color: "#2f2a24",
-                    }}
-                  >
-                    Possible missing information
-                  </p>
-                  <ul
-                    style={{
-                      margin: 0,
-                      paddingLeft: "18px",
-                      color: "#766b5d",
-                      fontSize: "14px",
-                      lineHeight: 1.8,
-                    }}
-                  >
-                    {understanding.missingInformation.map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
-                </div>
+            <div style={{ background: '#fff', border: '1px solid #e6dac8', padding: 12, borderRadius: 8 }}>
+              <div style={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <button onClick={() => beginEdit('projectType', 0)} style={{ all: 'unset', cursor: 'pointer', color: '#2f2a24', fontSize: 16, fontWeight: 700 }}>Project type</button>
+                <span style={{ color: '#9a8f80' }}>{getAttribution('projectType', 0) === 'AI' ? '🤖' : '👤 Contractor'}</span>
               </div>
-
-              <div
-                style={{
-                  display: "flex",
-                  flexWrap: "wrap",
-                  gap: "12px",
-                }}
-              >
-                <button
-                  type="button"
-                  style={{
-                    border: "none",
-                    borderRadius: "12px",
-                    padding: "14px 20px",
-                    background: "#594f43",
-                    color: "#ffffff",
-                    cursor: "pointer",
-                    fontSize: "15px",
-                    fontWeight: 700,
-                  }}
-                >
-                  Confirm Project Understanding
-                </button>
-                <button
-                  type="button"
-                  onClick={openReviewEdit}
-                  style={{
-                    border: "1px solid #d8cdbc",
-                    borderRadius: "12px",
-                    padding: "14px 20px",
-                    background: "#fffaf2",
-                    color: "#2f2a24",
-                    cursor: "pointer",
-                    fontSize: "15px",
-                    fontWeight: 700,
-                  }}
-                >
-                  Review & Edit
-                </button>
-              </div>
+              {editingItem?.field === 'projectType' ? (
+                <input ref={editInputRef} value={editingValue} onChange={(e) => setEditingValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') saveUnderstandingEdit(); if (e.key === 'Escape') cancelUnderstandingEdit(); }} onBlur={saveUnderstandingEdit} style={{ width: '100%', marginTop: 8, padding: 8, borderRadius: 8, border: '1px solid #d8cdbc' }} />
+              ) : (
+                <div onClick={() => beginEdit('projectType', 0)} style={{ marginTop: 8, color: '#766b5d', cursor: 'pointer' }}>{understanding.projectType || 'No project type detected'}</div>
+              )}
             </div>
-          </section>
-        )}
+
+            <div style={{ background: '#fff', border: '1px solid #e6dac8', padding: 12, borderRadius: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontWeight: 700 }}>Possible area</div>
+              </div>
+              {editingItem?.field === 'possibleRooms' ? (
+                <input ref={editInputRef} value={editingValue} onChange={(e) => setEditingValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') saveUnderstandingEdit(); if (e.key === 'Escape') cancelUnderstandingEdit(); }} onBlur={saveUnderstandingEdit} style={{ width: '100%', marginTop: 8, padding: 8, borderRadius: 8, border: '1px solid #d8cdbc' }} />
+              ) : (
+                <div onClick={() => beginEdit('possibleRooms', 0)} style={{ marginTop: 8, color: '#766b5d', cursor: 'pointer' }}>
+                  <span style={{ marginRight: 8 }}>{getAttribution('possibleRooms', 0) === 'AI' ? '🤖' : '👤'}</span>
+                  {understanding.possibleRooms[0] || 'None detected'}
+                </div>
+              )}
+            </div>
+
+            <div style={{ background: '#fff', border: '1px solid #e6dac8', padding: 12, borderRadius: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontWeight: 700 }}>Scope</div>
+                <button onClick={() => setScopeExpanded((s) => !s)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 14 }}>{scopeExpanded ? '▼' : '▶'}</button>
+              </div>
+              {scopeExpanded && (
+                <ul style={{ marginTop: 8, paddingLeft: 16 }}>
+                  {understanding.detectedScope.map((s, i) => {
+                    const attr = getAttribution('detectedScope', i);
+                    const isEditing = editingItem?.field === 'detectedScope' && editingItem.index === i;
+                    return (
+                      <li key={s} style={{ marginBottom: 6 }}>
+                        {isEditing ? (
+                          <input ref={editInputRef} value={editingValue} onChange={(e) => setEditingValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') saveUnderstandingEdit(); if (e.key === 'Escape') cancelUnderstandingEdit(); }} onBlur={saveUnderstandingEdit} style={{ width: '100%', padding: 6, borderRadius: 6, border: '1px solid #d8cdbc' }} />
+                        ) : (
+                          <span onClick={() => beginEdit('detectedScope', i)} style={{ cursor: 'pointer', color: '#2f2a24' }}>
+                            {attr === 'AI' ? '🤖 ' : '👤 '} {s}
+                          </span>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+
+            <div style={{ background: '#fff', border: '1px solid #e6dac8', padding: 12, borderRadius: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontWeight: 700 }}>⚠ Possible Missing Information ({understanding.missingInformation.length})</div>
+                <button onClick={() => setMissingOpen((s) => !s)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 14 }}>{missingOpen ? '▼' : '▶'}</button>
+              </div>
+              {missingOpen && (
+                <ul style={{ marginTop: 8, paddingLeft: 16 }}>
+                  {understanding.missingInformation.map((m, i) => {
+                    const attr = getAttribution('missingInformation', i);
+                    const isEditing = editingItem?.field === 'missingInformation' && editingItem.index === i;
+                    return (
+                      <li key={m} style={{ marginBottom: 6 }}>
+                        {isEditing ? (
+                          <input ref={editInputRef} value={editingValue} onChange={(e) => setEditingValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') saveUnderstandingEdit(); if (e.key === 'Escape') cancelUnderstandingEdit(); }} onBlur={saveUnderstandingEdit} style={{ width: '100%', padding: 6, borderRadius: 6, border: '1px solid #d8cdbc' }} />
+                        ) : (
+                          <span onClick={() => beginEdit('missingInformation', i)} style={{ cursor: 'pointer', color: '#2f2a24' }}>
+                            {attr === 'AI' ? '🤖 ' : '👤 '} {m}
+                          </span>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', gap: 12 }}>
+              <button onClick={() => setShowEstimate(true)} style={{ background: '#594f43', color: '#fff', border: 'none', padding: '10px 14px', borderRadius: 8 }}>See AI Estimate</button>
+              <button onClick={() => { setUserUnderstanding({}); try { localStorage.removeItem(storageKey); } catch {}; clearAttribution(); }} style={{ border: '1px solid #d8cdbc', background: '#fffaf2', padding: '10px 14px', borderRadius: 8 }}>Reset to AI Suggestion</button>
+            </div>
+
+          </div>
+        </section>
+
       </div>
 
-      {isEditingUnderstanding && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(47, 42, 36, 0.35)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: "24px",
-            overflowY: "auto",
-            zIndex: 50,
-          }}
-        >
-          <div
-            style={{
-              width: "100%",
-              maxWidth: "840px",
-              maxHeight: "calc(100vh - 32px)",
-              display: "flex",
-              flexDirection: "column",
-              background: "#fffaf2",
-              border: "1px solid #d8cdbc",
-              borderRadius: "20px",
-              boxShadow: "0 24px 48px rgba(75, 62, 47, 0.18)",
-              overflow: "hidden",
-            }}
-          >
-            <div
-              style={{
-                flexShrink: 0,
-                padding: "28px 32px 24px",
-                borderBottom: "1px solid #e6dac8",
-              }}
-            >
-              <p
-                style={{
-                  margin: 0,
-                  color: "#766b5d",
-                  fontSize: "14px",
-                }}
-              >
-                Review & Edit
-              </p>
-              <h2
-                style={{
-                  margin: "8px 0 0",
-                  fontSize: "28px",
-                  fontWeight: 700,
-                  color: "#2f2a24",
-                }}
-              >
-                Project Understanding
-              </h2>
-            </div>
-
-            <div
-              style={{
-                flex: "1 1 auto",
-                minHeight: 0,
-                overflowY: "auto",
-                padding: "24px 32px 0",
-                display: "grid",
-                gap: "24px",
-              }}
-            >
-              <div
-                style={{
-                  display: "grid",
-                  gap: "10px",
-                }}
-              >
-                <label
-                  style={{
-                    fontSize: "14px",
-                    color: "#766b5d",
-                    fontWeight: 700,
-                  }}
-                >
-                  Project type
-                </label>
-                <input
-                  value={editingUnderstanding.projectType}
-                  onChange={(event) =>
-                    updateEditingField("projectType", event.target.value)
-                  }
-                  style={{
-                    width: "100%",
-                    border: "1px solid #d8cdbc",
-                    borderRadius: "12px",
-                    padding: "14px 16px",
-                    fontSize: "15px",
-                    color: "#2f2a24",
-                    background: "#f8f1e5",
-                  }}
-                />
-              </div>
-
-              <div
-                style={{
-                  display: "grid",
-                  gap: "18px",
-                }}
-              >
-                <div
-                  style={{
-                    display: "grid",
-                    gap: "12px",
-                  }}
-                >
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                    }}
-                  >
-                    <p
-                      style={{
-                        margin: 0,
-                        fontSize: "15px",
-                        fontWeight: 700,
-                        color: "#2f2a24",
-                      }}
-                    >
-                      Rooms
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => addListItem("possibleRooms")}
-                      style={{
-                        border: "1px solid #d8cdbc",
-                        borderRadius: "10px",
-                        background: "#fffaf2",
-                        padding: "10px 14px",
-                        color: "#2f2a24",
-                        cursor: "pointer",
-                        fontSize: "14px",
-                      }}
-                    >
-                      Add room
-                    </button>
-                  </div>
-                  <div
-                    style={{
-                      display: "grid",
-                      gap: "10px",
-                    }}
-                  >
-                    {editingUnderstanding.possibleRooms.map((room, index) => (
-                      <div
-                        key={`${room}-${index}`}
-                        style={{
-                          display: "grid",
-                          gap: "8px",
-                          background: "#f8f1e5",
-                          border: "1px solid #d8cdbc",
-                          borderRadius: "12px",
-                          padding: "14px",
-                        }}
-                      >
-                        <input
-                          value={room}
-                          onChange={(event) =>
-                            updateListItem(
-                              "possibleRooms",
-                              index,
-                              event.target.value,
-                            )
-                          }
-                          style={{
-                            width: "100%",
-                            border: "1px solid #d8cdbc",
-                            borderRadius: "10px",
-                            padding: "12px 14px",
-                            fontSize: "15px",
-                            background: "#fff",
-                            color: "#2f2a24",
-                          }}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => removeListItem("possibleRooms", index)}
-                          style={{
-                            width: "fit-content",
-                            border: "none",
-                            background: "transparent",
-                            color: "#9a3f32",
-                            cursor: "pointer",
-                            fontSize: "14px",
-                            padding: 0,
-                            alignSelf: "flex-start",
-                          }}
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div
-                  style={{
-                    display: "grid",
-                    gap: "12px",
-                  }}
-                >
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                    }}
-                  >
-                    <p
-                      style={{
-                        margin: 0,
-                        fontSize: "15px",
-                        fontWeight: 700,
-                        color: "#2f2a24",
-                      }}
-                    >
-                      Scope of work
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => addListItem("detectedScope")}
-                      style={{
-                        border: "1px solid #d8cdbc",
-                        borderRadius: "10px",
-                        background: "#fffaf2",
-                        padding: "10px 14px",
-                        color: "#2f2a24",
-                        cursor: "pointer",
-                        fontSize: "14px",
-                      }}
-                    >
-                      Add scope item
-                    </button>
-                  </div>
-                  <div
-                    style={{
-                      display: "grid",
-                      gap: "10px",
-                    }}
-                  >
-                    {editingUnderstanding.detectedScope.map((scope, index) => (
-                      <div
-                        key={`${scope}-${index}`}
-                        style={{
-                          display: "grid",
-                          gap: "8px",
-                          background: "#f8f1e5",
-                          border: "1px solid #d8cdbc",
-                          borderRadius: "12px",
-                          padding: "14px",
-                        }}
-                      >
-                        <input
-                          value={scope}
-                          onChange={(event) =>
-                            updateListItem(
-                              "detectedScope",
-                              index,
-                              event.target.value,
-                            )
-                          }
-                          style={{
-                            width: "100%",
-                            border: "1px solid #d8cdbc",
-                            borderRadius: "10px",
-                            padding: "12px 14px",
-                            fontSize: "15px",
-                            background: "#fff",
-                            color: "#2f2a24",
-                          }}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => removeListItem("detectedScope", index)}
-                          style={{
-                            width: "fit-content",
-                            border: "none",
-                            background: "transparent",
-                            color: "#9a3f32",
-                            cursor: "pointer",
-                            fontSize: "14px",
-                            padding: 0,
-                            alignSelf: "flex-start",
-                          }}
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div
-                  style={{
-                    display: "grid",
-                    gap: "12px",
-                  }}
-                >
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                    }}
-                  >
-                    <p
-                      style={{
-                        margin: 0,
-                        fontSize: "15px",
-                        fontWeight: 700,
-                        color: "#2f2a24",
-                      }}
-                    >
-                      Missing information
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => addListItem("missingInformation")}
-                      style={{
-                        border: "1px solid #d8cdbc",
-                        borderRadius: "10px",
-                        background: "#fffaf2",
-                        padding: "10px 14px",
-                        color: "#2f2a24",
-                        cursor: "pointer",
-                        fontSize: "14px",
-                      }}
-                    >
-                      Add missing item
-                    </button>
-                  </div>
-                  <div
-                    style={{
-                      display: "grid",
-                      gap: "10px",
-                    }}
-                  >
-                    {editingUnderstanding.missingInformation.map((item, index) => (
-                      <div
-                        key={`${item}-${index}`}
-                        style={{
-                          display: "grid",
-                          gap: "8px",
-                          background: "#f8f1e5",
-                          border: "1px solid #d8cdbc",
-                          borderRadius: "12px",
-                          padding: "14px",
-                        }}
-                      >
-                        <input
-                          value={item}
-                          onChange={(event) =>
-                            updateListItem(
-                              "missingInformation",
-                              index,
-                              event.target.value,
-                            )
-                          }
-                          style={{
-                            width: "100%",
-                            border: "1px solid #d8cdbc",
-                            borderRadius: "10px",
-                            padding: "12px 14px",
-                            fontSize: "15px",
-                            background: "#fff",
-                            color: "#2f2a24",
-                          }}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => removeListItem("missingInformation", index)}
-                          style={{
-                            width: "fit-content",
-                            border: "none",
-                            background: "transparent",
-                            color: "#9a3f32",
-                            cursor: "pointer",
-                            fontSize: "14px",
-                            padding: 0,
-                            alignSelf: "flex-start",
-                          }}
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div
-              style={{
-                flexShrink: 0,
-                display: "flex",
-                justifyContent: "flex-end",
-                gap: "12px",
-                padding: "0 32px 24px",
-                background: "#fffaf2",
-                borderTop: "1px solid #e6dac8",
-              }}
-            >
-              <button
-                type="button"
-                onClick={resetToAISuggestion}
-                style={{
-                  border: "1px solid #d8cdbc",
-                  borderRadius: "12px",
-                  padding: "14px 20px",
-                  background: "#fffaf2",
-                  color: "#2f2a24",
-                  cursor: "pointer",
-                  fontSize: "15px",
-                }}
-              >
-                Reset to AI Suggestion
-              </button>
-
-              <button
-                type="button"
-                onClick={closeReviewEdit}
-                style={{
-                  border: "1px solid #d8cdbc",
-                  borderRadius: "12px",
-                  padding: "14px 20px",
-                  background: "#fffaf2",
-                  color: "#2f2a24",
-                  cursor: "pointer",
-                  fontSize: "15px",
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={saveUnderstandingEdits}
-                style={{
-                  border: "none",
-                  borderRadius: "12px",
-                  padding: "14px 20px",
-                  background: "#594f43",
-                  color: "#ffffff",
-                  cursor: "pointer",
-                  fontSize: "15px",
-                  fontWeight: 700,
-                }}
-              >
-                Save Changes
-              </button>
-            </div>
+      {/* Estimate panel */}
+      {showEstimate && (
+        <div style={{ position: 'fixed', right: 20, bottom: 20, width: 320, background: '#fff', border: '1px solid #e6dac8', borderRadius: 10, padding: 12, boxShadow: '0 8px 20px rgba(0,0,0,0.08)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ fontWeight: 700 }}>Estimate preview</div>
+            <button onClick={() => setShowEstimate(false)} style={{ border: 'none', background: 'transparent', cursor: 'pointer' }}>Close</button>
+          </div>
+          <div style={{ marginTop: 8 }}>
+            <div style={{ color: '#766b5d' }}><strong>Detected area:</strong> {understanding.possibleRooms[0] ?? 'Unknown'}</div>
+            <div style={{ color: '#766b5d', marginTop: 6 }}><strong>Detected scope:</strong> {understanding.detectedScope.join(', ') || 'None'}</div>
+            <div style={{ color: '#766b5d', marginTop: 6 }}><strong>Unresolved missing:</strong> {understanding.missingInformation.length}</div>
+            <p style={{ marginTop: 10 }}>Estimate generation will use the confirmed scope, quantities, materials, and company pricing rules.</p>
           </div>
         </div>
       )}
+
+      {/* Activity panel bottom */}
+      <div style={{ position: 'fixed', left: 20, bottom: 20, width: 320 }}>
+        <div style={{ background: '#fff', border: '1px solid #e6dac8', borderRadius: 8, overflow: 'hidden' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 8, cursor: 'pointer' }} onClick={() => setActivityOpen((s)=>!s)}>
+            <div style={{ fontWeight: 700 }}>Activity</div>
+            <div style={{ color: '#766b5d' }}>{activityOpen ? '▴' : '▾'}</div>
+          </div>
+          {activityOpen && (
+            <div style={{ maxHeight: 220, overflow: 'auto', padding: 8 }}>
+              {activity.length === 0 ? <div style={{ color: '#766b5d' }}>No activity</div> : activity.slice().reverse().map((a, i) => <div key={i} style={{ padding: 8, borderBottom: '1px solid #f0e9df' }}>{a}</div>)}
+            </div>
+          )}
+        </div>
+      </div>
     </main>
   );
 }

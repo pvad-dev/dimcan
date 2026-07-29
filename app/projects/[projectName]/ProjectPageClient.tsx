@@ -15,6 +15,14 @@ type UploadResponse = {
   message?: string;
 };
 
+type ProjectFileMeta = {
+  id: string;
+  filename: string;
+  type: string;
+  size: number;
+  uploadedAt: string;
+};
+
 type ProjectUnderstanding = {
   projectType: string;
   confidence: number;
@@ -70,8 +78,110 @@ function formatFileSize(size: number) {
   return `${size} B`;
 }
 
+function formatDateTime(dateTime: string) {
+  return new Date(dateTime).toLocaleString([], {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function getFileCategory(type: string, filename: string) {
+  const lowerType = type.toLowerCase();
+  const lowerName = filename.toLowerCase();
+
+  if (lowerType === "application/pdf" || lowerName.endsWith(".pdf")) {
+    return "PDF";
+  }
+  if (lowerType.startsWith("image/") || /(jpg|jpeg|png|gif|bmp|webp|svg)$/.test(lowerName)) {
+    return "Image";
+  }
+  if (lowerType.startsWith("video/") || /(mp4|mov|avi|mkv|webm)$/.test(lowerName)) {
+    return "Video";
+  }
+  if (
+    lowerType === "application/msword" ||
+    lowerType ===
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+    /(doc|docx)$/.test(lowerName)
+  ) {
+    return "Document";
+  }
+  if (
+    lowerType === "application/vnd.ms-excel" ||
+    lowerType ===
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+    lowerType === "application/vnd.ms-excel.sheet.macroenabled.12" ||
+    /(xls|xlsx|csv)$/.test(lowerName)
+  ) {
+    return "Spreadsheet";
+  }
+  return "Other";
+}
+
+function getFileIcon(category: string) {
+  switch (category) {
+    case "PDF":
+      return "📄";
+    case "Image":
+      return "🖼️";
+    case "Video":
+      return "🎬";
+    case "Document":
+      return "📝";
+    case "Spreadsheet":
+      return "📊";
+    default:
+      return "📁";
+  }
+}
+
+function generateMockProjectNameSuggestions(
+  projectFiles: ProjectFileMeta[],
+  projectName: string,
+) {
+  if (projectFiles.length === 0) {
+    return [];
+  }
+
+  const names = projectFiles
+    .flatMap((file) => file.filename.split(/[^a-zA-Z0-9]+/))
+    .filter(Boolean)
+    .map((word) => word.replace(/\W/g, ""))
+    .filter((word) => word.length >= 4);
+
+  const firstWord =
+    names.find((word) => /^[A-Za-z]/.test(word)) ||
+    projectName.split(/[^a-zA-Z0-9]+/).filter(Boolean)[0] ||
+    "Project";
+
+  const roomMatch = projectFiles.some((file) => /ensuite|bathroom|kitchen|bedroom|master/i.test(file.filename))
+    ? "Ensuite"
+    : "Bathroom";
+
+  const scopeMatch = projectFiles.some((file) => /tile|floor|waterproof|shower|bath|plumbing/i.test(file.filename))
+    ? "Tile Scope"
+    : "Renovation";
+
+  const location = `${firstWord}`;
+
+  return [
+    `${location} ${roomMatch} Renovation`,
+    `${location} ${scopeMatch} Project`,
+    `Master ${roomMatch} ${scopeMatch}`,
+  ];
+}
+
 export default function ProjectPageClient({ projectName }: { projectName: string }) {
   const [files, setFiles] = useState<UploadedFile[]>([]);
+  const [projectFiles, setProjectFiles] = useState<ProjectFileMeta[]>([]);
+  const [projectTitle, setProjectTitle] = useState(projectName);
+  const [titleDraft, setTitleDraft] = useState(projectName);
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [showNameSuggestions, setShowNameSuggestions] = useState(false);
+  const [hasSelectedTitle, setHasSelectedTitle] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState(false);
@@ -91,8 +201,12 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     ProjectUnderstanding
   >(defaultUnderstanding);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const previousTitleRef = useRef(projectName);
 
   const storageKey = `dimcan:projectUnderstanding:${projectName}`;
+  const fileStorageKey = `dimcan:projectFiles:${projectName}`;
+  const titleStorageKey = `dimcan:projectTitle:${projectName}`;
 
   // Load saved user edits from localStorage on mount
   useEffect(() => {
@@ -106,7 +220,39 @@ export default function ProjectPageClient({ projectName }: { projectName: string
       // ignore parse errors
       // console.warn("Failed to load project understanding from localStorage", e);
     }
-  }, [storageKey]);
+
+    try {
+      const rawFiles = localStorage.getItem(fileStorageKey);
+      if (rawFiles) {
+        const parsedFiles = JSON.parse(rawFiles) as ProjectFileMeta[];
+        setProjectFiles(parsedFiles);
+      }
+    } catch (e) {
+      // ignore parse errors
+    }
+
+    try {
+      const rawTitle = localStorage.getItem(titleStorageKey);
+      if (rawTitle) {
+        setProjectTitle(rawTitle);
+        setTitleDraft(rawTitle);
+        setHasSelectedTitle(true);
+        setShowNameSuggestions(false);
+      }
+    } catch (e) {
+      // ignore parse errors
+    }
+  }, [storageKey, fileStorageKey, titleStorageKey]);
+
+  useEffect(() => {
+    if (projectFiles.length > 0 && !hasSelectedTitle) {
+      setShowNameSuggestions(true);
+    }
+  }, [projectFiles.length, hasSelectedTitle]);
+
+  useEffect(() => {
+    setTitleDraft(projectTitle);
+  }, [projectTitle]);
 
   useEffect(() => {
     if (!isEditingUnderstanding) return;
@@ -147,11 +293,72 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     return () => window.clearTimeout(timeout);
   }, [uploadSuccess]);
 
+  const projectNameSuggestions = useMemo(
+    () => generateMockProjectNameSuggestions(projectFiles, projectName),
+    [projectFiles, projectName],
+  );
+
   const activityMessage = useMemo(() => {
-    const fileCount = files.length;
+    const fileCount = projectFiles.length;
     if (fileCount === 0) return null;
     return `${fileCount} file${fileCount === 1 ? "" : "s"} added`;
-  }, [files]);
+  }, [projectFiles]);
+
+  const saveTitleDraft = (draft: string) => {
+    const nextTitle = draft.trim() || projectName;
+    setProjectTitle(nextTitle);
+    setTitleDraft(nextTitle);
+    setIsEditingTitle(false);
+    setHasSelectedTitle(true);
+    setShowNameSuggestions(false);
+    try {
+      localStorage.setItem(titleStorageKey, nextTitle);
+    } catch (e) {
+      // ignore storage errors
+    }
+  };
+
+  const cancelTitleEdit = () => {
+    setTitleDraft(projectTitle);
+    setIsEditingTitle(false);
+  };
+
+  const selectProjectTitle = (suggestedTitle: string) => {
+    saveTitleDraft(suggestedTitle);
+  };
+
+  const handleSuggestNames = () => {
+    setShowNameSuggestions((current) => !current);
+  };
+
+  const startTitleEdit = () => {
+    previousTitleRef.current = projectTitle;
+    setTitleDraft(projectTitle);
+    setIsEditingTitle(true);
+    setShowNameSuggestions(false);
+  };
+
+  const handleTitleInputBlur = () => {
+    if (isEditingTitle) {
+      saveTitleDraft(titleDraft);
+    }
+  };
+
+  useEffect(() => {
+    if (isEditingTitle) {
+      titleInputRef.current?.focus();
+      titleInputRef.current?.select();
+    }
+  }, [isEditingTitle]);
+
+  const handleTitleInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      saveTitleDraft(titleDraft);
+    }
+    if (event.key === "Escape") {
+      cancelTitleEdit();
+    }
+  };
 
   const openReviewEdit = () => {
     setEditingUnderstanding(understanding);
@@ -270,6 +477,25 @@ export default function ProjectPageClient({ projectName }: { projectName: string
       }
 
       setFiles((current) => [...current, ...(data.files ?? [])]);
+
+      const newProjectFiles = (data.files ?? []).map((file) => ({
+        id: `${file.name}-${file.size}-${Date.now()}`,
+        filename: file.name,
+        type: file.type,
+        size: file.size,
+        uploadedAt: new Date().toISOString(),
+      }));
+
+      setProjectFiles((current) => {
+        const nextFiles = [...current, ...newProjectFiles];
+        try {
+          localStorage.setItem(fileStorageKey, JSON.stringify(nextFiles));
+        } catch (e) {
+          // ignore storage errors
+        }
+        return nextFiles;
+      });
+
       setUploadSuccess(true);
 
       setActivity((current) => [
@@ -286,6 +512,18 @@ export default function ProjectPageClient({ projectName }: { projectName: string
       setIsUploading(false);
       setDragActive(false);
     }
+  };
+
+  const deleteProjectFile = (fileId: string) => {
+    setProjectFiles((current) => {
+      const nextFiles = current.filter((file) => file.id !== fileId);
+      try {
+        localStorage.setItem(fileStorageKey, JSON.stringify(nextFiles));
+      } catch (e) {
+        // ignore storage errors
+      }
+      return nextFiles;
+    });
   };
 
   const onDrop = (event: React.DragEvent<HTMLDivElement>) => {
@@ -355,73 +593,182 @@ export default function ProjectPageClient({ projectName }: { projectName: string
             Dimcan Project
           </p>
 
-          <h1
-            style={{
-              margin: 0,
-              fontSize: "38px",
-              fontWeight: 600,
-            }}
-          >
-            {projectName}
-          </h1>
-        </header>
+            {isEditingTitle ? (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "12px",
+                  flexWrap: "wrap",
+                  marginBottom: "14px",
+                }}
+              >
+                <input
+                  ref={titleInputRef}
+                  value={titleDraft}
+                  onChange={(event) => setTitleDraft(event.target.value)}
+                  onKeyDown={handleTitleInputKeyDown}
+                  onBlur={handleTitleInputBlur}
+                  aria-label="Edit project title"
+                  style={{
+                    fontSize: "38px",
+                    fontWeight: 600,
+                    border: "1px solid #d8cdbc",
+                    borderRadius: "14px",
+                    padding: "12px 16px",
+                    width: "100%",
+                    maxWidth: "560px",
+                    outline: "none",
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => saveTitleDraft(titleDraft)}
+                  style={{
+                    border: "1px solid #d8cdbc",
+                    borderRadius: "12px",
+                    padding: "12px 18px",
+                    background: "#fffaf2",
+                    color: "#2f2a24",
+                    cursor: "pointer",
+                    fontSize: "14px",
+                    fontWeight: 700,
+                  }}
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  onClick={cancelTitleEdit}
+                  style={{
+                    border: "1px solid transparent",
+                    borderRadius: "12px",
+                    padding: "12px 18px",
+                    background: "transparent",
+                    color: "#766b5d",
+                    cursor: "pointer",
+                    fontSize: "14px",
+                    fontWeight: 700,
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "16px",
+                  flexWrap: "wrap",
+                  marginBottom: "14px",
+                }}
+              >
+                <h1
+                  style={{
+                    margin: 0,
+                    fontSize: "38px",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                  onClick={startTitleEdit}
+                >
+                  {projectTitle}
+                </h1>
+                <button
+                  type="button"
+                  onClick={startTitleEdit}
+                  style={{
+                    border: "1px solid #d8cdbc",
+                    borderRadius: "12px",
+                    padding: "12px 18px",
+                    background: "#fffaf2",
+                    color: "#2f2a24",
+                    cursor: "pointer",
+                    fontSize: "14px",
+                    fontWeight: 700,
+                  }}
+                >
+                  Edit title
+                </button>
+              </div>
+            )}
 
-        <section
-          style={{
-            background: "#fffaf2",
-            border: "1px solid #d8cdbc",
-            borderRadius: "18px",
-            padding: "60px 30px",
-            textAlign: "center",
-            marginBottom: "36px",
-            boxShadow: "0 12px 30px rgba(75, 62, 47, 0.06)",
-          }}
-        >
-          <div
-            onDragOver={onDragOver}
-            onDragLeave={onDragLeave}
-            onDrop={onDrop}
-            onClick={openFilePicker}
-            onMouseEnter={() => setHoverActive(true)}
-            onMouseLeave={() => setHoverActive(false)}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                openFilePicker();
-              }
-            }}
+            {projectNameSuggestions.length > 0 && (
+              <button
+                type="button"
+                onClick={handleSuggestNames}
+                style={{
+                  border: "1px solid #d8cdbc",
+                  borderRadius: "12px",
+                  padding: "10px 16px",
+                  background: "#fffaf2",
+                  color: "#2f2a24",
+                  cursor: "pointer",
+                  fontSize: "14px",
+                  fontWeight: 700,
+                }}
+              >
+                {showNameSuggestions ? "Hide suggestions" : "Suggest names"}
+              </button>
+            )}
+          </header>
+
+          <section
             style={{
-              border: dragActive
-                ? "2px dashed #594f43"
-                : hoverActive
-                ? "2px dashed #b49c7f"
-                : "2px dashed #d8cdbc",
+              background: "#fffaf2",
+              border: "1px solid #d8cdbc",
               borderRadius: "18px",
               padding: "60px 30px",
-              background: dragActive
-                ? "#efe4d2"
-                : hoverActive
-                ? "#f7ead6"
-                : "#f8f1e5",
-              maxWidth: "680px",
-              margin: "0 auto",
-              cursor: "pointer",
-              transition:
-                "background 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease",
-              boxShadow: dragActive
-                ? "0 18px 36px rgba(75, 62, 47, 0.12)"
-                : hoverActive
-                ? "0 14px 30px rgba(75, 62, 47, 0.1)"
-                : "none",
+              marginBottom: "36px",
+              boxShadow: "0 12px 30px rgba(75, 62, 47, 0.06)",
             }}
           >
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              hidden
-              onChange={(event) => handleFiles(event.target.files)}
+            <div
+              onDragOver={onDragOver}
+              onDragLeave={onDragLeave}
+              onDrop={onDrop}
+              onClick={openFilePicker}
+              onMouseEnter={() => setHoverActive(true)}
+              onMouseLeave={() => setHoverActive(false)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  openFilePicker();
+                }
+              }}
+              style={{
+                border: dragActive
+                  ? "2px dashed #594f43"
+                  : hoverActive
+                  ? "2px dashed #b49c7f"
+                  : "2px dashed #d8cdbc",
+                borderRadius: "18px",
+                padding: "60px 30px",
+                background: dragActive
+                  ? "#efe4d2"
+                  : hoverActive
+                  ? "#f7ead6"
+                  : "#f8f1e5",
+                maxWidth: "680px",
+                margin: "0 auto",
+                cursor: "pointer",
+                transition:
+                  "background 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease",
+                boxShadow: dragActive
+                  ? "0 18px 36px rgba(75, 62, 47, 0.12)"
+                  : hoverActive
+                  ? "0 14px 30px rgba(75, 62, 47, 0.1)"
+                  : "none",
+              }}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                hidden
+                onChange={(event) => handleFiles(event.target.files)}
             />
 
             <div
@@ -507,6 +854,228 @@ export default function ProjectPageClient({ projectName }: { projectName: string
           </div>
         </section>
 
+        {projectFiles.length > 0 && (
+          <>
+            <section
+              style={{
+                background: "#fffaf2",
+                border: "1px solid #d8cdbc",
+                borderRadius: "18px",
+                padding: "32px",
+                marginBottom: "36px",
+                boxShadow: "0 12px 30px rgba(75, 62, 47, 0.06)",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "flex-start",
+                  gap: "20px",
+                  flexWrap: "wrap",
+                }}
+              >
+                <div>
+                  <p
+                    style={{
+                      margin: 0,
+                      color: "#766b5d",
+                      fontSize: "14px",
+                    }}
+                  >
+                    Project Documents
+                  </p>
+                  <h2
+                    style={{
+                      margin: "8px 0 0",
+                      fontSize: "28px",
+                      fontWeight: 700,
+                      color: "#2f2a24",
+                    }}
+                  >
+                    Document library
+                  </h2>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  display: "grid",
+                  gap: "14px",
+                  marginTop: "28px",
+                }}
+              >
+                {projectFiles.map((file) => {
+                  const category = getFileCategory(file.type, file.filename);
+                  return (
+                    <div
+                      key={file.id}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "auto 1fr auto",
+                        gap: "16px",
+                        alignItems: "center",
+                        background: "#f8f1e5",
+                        border: "1px solid #d8cdbc",
+                        borderRadius: "14px",
+                        padding: "18px 20px",
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: "44px",
+                          height: "44px",
+                          borderRadius: "14px",
+                          background: "#fff",
+                          display: "grid",
+                          placeItems: "center",
+                          fontSize: "20px",
+                        }}
+                      >
+                        {getFileIcon(category)}
+                      </div>
+                      <div
+                        style={{
+                          display: "grid",
+                          gap: "4px",
+                        }}
+                      >
+                        <p
+                          style={{
+                            margin: 0,
+                            fontSize: "15px",
+                            fontWeight: 700,
+                            color: "#2f2a24",
+                          }}
+                        >
+                          {file.filename}
+                        </p>
+                        <p
+                          style={{
+                            margin: 0,
+                            color: "#766b5d",
+                            fontSize: "14px",
+                          }}
+                        >
+                          {formatFileSize(file.size)} • {formatDateTime(file.uploadedAt)}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => deleteProjectFile(file.id)}
+                        style={{
+                          border: "1px solid #d8cdbc",
+                          borderRadius: "12px",
+                          padding: "10px 14px",
+                          background: "#fffaf2",
+                          color: "#2f2a24",
+                          cursor: "pointer",
+                          fontSize: "14px",
+                          fontWeight: 700,
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+
+            {projectNameSuggestions.length > 0 && showNameSuggestions && (
+              <section
+                style={{
+                  background: "#fffaf2",
+                  border: "1px solid #d8cdbc",
+                  borderRadius: "18px",
+                  padding: "28px 32px",
+                  marginBottom: "36px",
+                  boxShadow: "0 12px 30px rgba(75, 62, 47, 0.06)",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: "12px",
+                    flexWrap: "wrap",
+                    marginBottom: "22px",
+                  }}
+                >
+                  <div>
+                    <p
+                      style={{
+                        margin: 0,
+                        color: "#766b5d",
+                        fontSize: "14px",
+                      }}
+                    >
+                      AI suggestion
+                    </p>
+                    <h2
+                      style={{
+                        margin: "8px 0 0",
+                        fontSize: "24px",
+                        fontWeight: 700,
+                        color: "#2f2a24",
+                      }}
+                    >
+                      Suggested project names
+                    </h2>
+                  </div>
+                </div>
+
+                <div style={{ display: "grid", gap: "14px" }}>
+                  {projectNameSuggestions.map((suggestion) => (
+                    <div
+                      key={suggestion}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "16px",
+                        background: "#f8f1e5",
+                        border: "1px solid #d8cdbc",
+                        borderRadius: "14px",
+                        padding: "18px 20px",
+                      }}
+                    >
+                      <p
+                        style={{
+                          margin: 0,
+                          color: "#2f2a24",
+                          fontSize: "15px",
+                          fontWeight: 700,
+                        }}
+                      >
+                        {suggestion}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => selectProjectTitle(suggestion)}
+                        style={{
+                          border: "1px solid #d8cdbc",
+                          borderRadius: "12px",
+                          padding: "10px 16px",
+                          background: "#fffaf2",
+                          color: "#2f2a24",
+                          cursor: "pointer",
+                          fontSize: "14px",
+                          fontWeight: 700,
+                        }}
+                      >
+                        Use this name
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+          </>
+        )}
+
         <section>
           <h2
             style={{
@@ -571,7 +1140,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
           )}
         </section>
 
-        {files.length > 0 && (
+        {projectFiles.length > 0 && (
           <section
             style={{
               background: "#fffaf2",

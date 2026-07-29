@@ -92,6 +92,33 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   >(defaultUnderstanding);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  const storageKey = `dimcan:projectUnderstanding:${projectName}`;
+
+  // Load saved user edits from localStorage on mount
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Partial<ProjectUnderstanding>;
+        setUserUnderstanding(parsed);
+      }
+    } catch (e) {
+      // ignore parse errors
+      // console.warn("Failed to load project understanding from localStorage", e);
+    }
+  }, [storageKey]);
+
+  useEffect(() => {
+    if (!isEditingUnderstanding) return;
+
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    return () => {
+      document.body.style.overflow = originalOverflow;
+    };
+  }, [isEditingUnderstanding]);
+
   const understanding = useMemo(
     () => mergeUnderstanding(aiUnderstanding, userUnderstanding),
     [aiUnderstanding, userUnderstanding],
@@ -186,13 +213,32 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   };
 
   const saveUnderstandingEdits = () => {
-    setUserUnderstanding({
+    const newUserEdits: Partial<ProjectUnderstanding> = {
       projectType: editingUnderstanding.projectType,
       possibleRooms: editingUnderstanding.possibleRooms,
       detectedScope: editingUnderstanding.detectedScope,
       missingInformation: editingUnderstanding.missingInformation,
-    });
+    };
+
+    setUserUnderstanding(newUserEdits);
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(newUserEdits));
+    } catch (e) {
+      // ignore storage errors
+    }
+
     setIsEditingUnderstanding(false);
+  };
+
+  const resetToAISuggestion = () => {
+    // Restore the editing view to AI suggestion and remove saved user edits
+    setEditingUnderstanding(aiUnderstanding);
+    setUserUnderstanding({});
+    try {
+      localStorage.removeItem(storageKey);
+    } catch (e) {
+      // ignore
+    }
   };
 
   const handleFiles = async (selectedFiles: FileList | null) => {
@@ -825,6 +871,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
             alignItems: "center",
             justifyContent: "center",
             padding: "24px",
+            overflowY: "auto",
             zIndex: 50,
           }}
         >
@@ -832,6 +879,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
             style={{
               width: "100%",
               maxWidth: "840px",
+              maxHeight: "calc(100vh - 32px)",
+              display: "flex",
+              flexDirection: "column",
               background: "#fffaf2",
               border: "1px solid #d8cdbc",
               borderRadius: "20px",
@@ -841,6 +891,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
           >
             <div
               style={{
+                flexShrink: 0,
                 padding: "28px 32px 24px",
                 borderBottom: "1px solid #e6dac8",
               }}
@@ -868,7 +919,10 @@ export default function ProjectPageClient({ projectName }: { projectName: string
 
             <div
               style={{
-                padding: "28px 32px",
+                flex: "1 1 auto",
+                minHeight: 0,
+                overflowY: "auto",
+                padding: "24px 32px 0",
                 display: "grid",
                 gap: "24px",
               }}
@@ -1206,6 +1260,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
 
             <div
               style={{
+                flexShrink: 0,
                 display: "flex",
                 justifyContent: "flex-end",
                 gap: "12px",
@@ -1214,6 +1269,22 @@ export default function ProjectPageClient({ projectName }: { projectName: string
                 borderTop: "1px solid #e6dac8",
               }}
             >
+              <button
+                type="button"
+                onClick={resetToAISuggestion}
+                style={{
+                  border: "1px solid #d8cdbc",
+                  borderRadius: "12px",
+                  padding: "14px 20px",
+                  background: "#fffaf2",
+                  color: "#2f2a24",
+                  cursor: "pointer",
+                  fontSize: "15px",
+                }}
+              >
+                Reset to AI Suggestion
+              </button>
+
               <button
                 type="button"
                 onClick={closeReviewEdit}

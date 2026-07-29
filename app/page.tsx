@@ -80,7 +80,11 @@ export default function Home() {
   }
 
   useEffect(() => {
-    void loadWorkspace();
+    const timer = window.setTimeout(() => {
+      void loadWorkspace();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
   }, []);
 
   return (

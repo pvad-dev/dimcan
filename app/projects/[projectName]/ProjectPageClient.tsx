@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { assemblyComponents as masterAssemblyComponents } from "../../../data/assembly-components";
+import { assemblies as masterAssemblies, type Assembly, type AssemblyComponent, type ComponentStatus, type ProjectAssembly } from "../../../data/assemblies";
 
 type ProjectFileMeta = {
   id: string;
@@ -27,6 +29,23 @@ type EditingItem = {
   index: number;
 };
 
+const readStorageValue = <T,>(key: string, fallback: T): T => {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+const writeStorageValue = (key: string, value: unknown) => {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {}
+};
+
 export default function ProjectPageClient({ projectName }: { projectName: string }) {
   const storageKey = `dimcan:projectUnderstanding:${projectName}`;
   const fileStorageKey = `dimcan:projectFiles:${projectName}`;
@@ -34,28 +53,33 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   const notesStorageKey = `dimcan:projectNotes:${projectName}`;
   const activityStorageKey = `dimcan:projectActivity:${projectName}`;
   const attrStorageKey = `dimcan:projectAttr:${projectName}`;
+  const assemblyStorageKey = `dimcan:projectAssemblies:${projectName}`;
 
-  const [projectTitle, setProjectTitle] = useState(projectName);
-  const [titleDraft, setTitleDraft] = useState(projectName);
+  const [projectTitle, setProjectTitle] = useState(() => readStorageValue(titleStorageKey, projectName));
+  const [titleDraft, setTitleDraft] = useState(() => readStorageValue(titleStorageKey, projectName));
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [projectFiles, setProjectFiles] = useState<ProjectFileMeta[]>([]);
+  const [projectFiles, setProjectFiles] = useState<ProjectFileMeta[]>(() => readStorageValue<ProjectFileMeta[]>(fileStorageKey, []));
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [notes, setNotes] = useState("");
+  const [notes, setNotes] = useState(() => readStorageValue(notesStorageKey, ""));
   const notesTimer = useRef<number | null>(null);
 
-  const [activity, setActivity] = useState<string[]>([]);
+  const [activity, setActivity] = useState<string[]>(() => readStorageValue<string[]>(activityStorageKey, []));
   const [activityOpen, setActivityOpen] = useState(false);
+
+  const [assembliesState, setAssembliesState] = useState<ProjectAssembly[]>(() => readStorageValue<ProjectAssembly[]>(assemblyStorageKey, []));
+  const [showAssemblyPicker, setShowAssemblyPicker] = useState(false);
+  const [assemblySearch, setAssemblySearch] = useState("");
+  const [assemblyCategory, setAssemblyCategory] = useState("All");
+  const [expandedAssemblies, setExpandedAssemblies] = useState<Record<string, boolean>>({});
 
   const [editingItem, setEditingItem] = useState<EditingItem | null>(null);
   const [editingValue, setEditingValue] = useState("");
   const editInputRef = useRef<HTMLInputElement | null>(null);
   const [scopeExpanded, setScopeExpanded] = useState(true);
   const [missingOpen, setMissingOpen] = useState(false);
-
-  const attributionRef = useRef<Record<string, "AI" | "User">>({});
 
   // Simple mock understanding generator
   const generateMockUnderstanding = (files: ProjectFileMeta[]): ProjectUnderstanding => {
@@ -100,7 +124,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   };
 
   const aiUnderstanding = useMemo(() => generateMockUnderstanding(projectFiles), [projectFiles]);
-  const [userUnderstanding, setUserUnderstanding] = useState<Partial<ProjectUnderstanding>>({});
+  const [userUnderstanding, setUserUnderstanding] = useState<Partial<ProjectUnderstanding>>(() => readStorageValue<Partial<ProjectUnderstanding>>(storageKey, {}));
   const understanding = useMemo(() => ({
     projectType: userUnderstanding.projectType ?? aiUnderstanding.projectType,
     confidence: aiUnderstanding.confidence,
@@ -110,56 +134,129 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     missingInformation: userUnderstanding.missingInformation ?? aiUnderstanding.missingInformation,
   }), [aiUnderstanding, userUnderstanding]);
 
-  // Load persisted data
-  useEffect(() => {
-    try {
-      const rawFiles = localStorage.getItem(fileStorageKey);
-      if (rawFiles) setProjectFiles(JSON.parse(rawFiles));
-    } catch {}
-    try {
-      const rawTitle = localStorage.getItem(titleStorageKey);
-      if (rawTitle) {
-        setProjectTitle(rawTitle);
-        setTitleDraft(rawTitle);
-      }
-    } catch {}
-    try {
-      const rawNotes = localStorage.getItem(notesStorageKey);
-      if (rawNotes) setNotes(rawNotes);
-    } catch {}
-    try {
-      const rawActivity = localStorage.getItem(activityStorageKey);
-      if (rawActivity) setActivity(JSON.parse(rawActivity));
-    } catch {}
-    try {
-      const rawAttr = localStorage.getItem(attrStorageKey);
-      if (rawAttr) attributionRef.current = JSON.parse(rawAttr);
-    } catch {}
-    try {
-      const rawUser = localStorage.getItem(storageKey);
-      if (rawUser) setUserUnderstanding(JSON.parse(rawUser));
-    } catch {}
-  }, [fileStorageKey, titleStorageKey, notesStorageKey, activityStorageKey, attrStorageKey, storageKey]);
+  const [attributionState, setAttributionState] = useState<Record<string, "AI" | "User">>(() => readStorageValue<Record<string, "AI" | "User">>(attrStorageKey, {}));
+
+  const assemblyCategories = useMemo(() => ["All", ...Array.from(new Set(masterAssemblies.map((assembly) => assembly.category)))], []);
+  const availableAssemblies = useMemo(() => {
+    const addedAssemblyIds = new Set(assembliesState.map((assembly) => assembly.sourceAssemblyId));
+    const normalizedSearch = assemblySearch.trim().toLowerCase();
+
+    return masterAssemblies.filter((assembly) => {
+      if (addedAssemblyIds.has(assembly.id)) return false;
+      if (assemblyCategory !== "All" && assembly.category !== assemblyCategory) return false;
+      if (!normalizedSearch) return true;
+      return [assembly.name, assembly.category, assembly.subcategory, assembly.projectContext]
+        .join(" ")
+        .toLowerCase()
+        .includes(normalizedSearch);
+    });
+  }, [assemblyCategory, assemblySearch, assembliesState]);
 
   const persistFiles = (files: ProjectFileMeta[]) => {
     setProjectFiles(files);
-    try { localStorage.setItem(fileStorageKey, JSON.stringify(files)); } catch {}
+    writeStorageValue(fileStorageKey, files);
   };
 
   const pushActivity = (text: string) => {
     const entry = `${text} — ${new Date().toLocaleString()}`;
     setActivity((current) => {
       const next = [...current, entry];
-      try { localStorage.setItem(activityStorageKey, JSON.stringify(next)); } catch {}
+      writeStorageValue(activityStorageKey, next);
       return next;
     });
   };
 
-  // Title editing
-  useEffect(() => {
-    setTitleDraft(projectTitle);
-  }, [projectTitle]);
+  const persistAssemblies = (next: ProjectAssembly[]) => {
+    setAssembliesState(next);
+    writeStorageValue(assemblyStorageKey, next);
+  };
 
+  const addAssembly = (assembly: Assembly) => {
+    if (assembliesState.some((item) => item.sourceAssemblyId === assembly.id)) return;
+
+    const now = new Date().toISOString();
+    const projectAssembly: ProjectAssembly = {
+      id: `${assembly.id}-${now}`,
+      sourceAssemblyId: assembly.id,
+      projectId: projectName,
+      assembly,
+      components: masterAssemblyComponents
+        .filter((component) => component.assemblyId === assembly.id)
+        .sort((a, b) => a.sequence - b.sequence)
+        .map((component) => ({
+          ...component,
+          componentStatus: component.requirementStatus === "Optional" ? "Optional" : component.requirementStatus === "Excluded" ? "Excluded" : "Included",
+        })),
+      includedStatus: "Included",
+      contractorEdited: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const next = [...assembliesState, projectAssembly];
+    persistAssemblies(next);
+    pushActivity(`Assembly added: ${assembly.name}`);
+    setShowAssemblyPicker(false);
+  };
+
+  const removeAssembly = (assemblyId: string) => {
+    if (!window.confirm("Remove this assembly from the project?")) return;
+
+    const next = assembliesState.filter((item) => item.id !== assemblyId);
+    persistAssemblies(next);
+    pushActivity("Assembly removed");
+  };
+
+  const updateComponentStatus = (assemblyId: string, componentId: string, componentStatus: ComponentStatus) => {
+    const next = assembliesState.map((item) => {
+      if (item.id !== assemblyId) return item;
+      const nextComponents = item.components.map((component) => (
+        component.id === componentId ? { ...component, componentStatus } : component
+      )) as Array<AssemblyComponent & { componentStatus: ComponentStatus }>;
+      return {
+        ...item,
+        contractorEdited: true,
+        components: nextComponents,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+
+    persistAssemblies(next);
+    if (!assembliesState.find((item) => item.id === assemblyId)?.contractorEdited) {
+      pushActivity("Assembly component updated");
+    }
+  };
+
+  const updateComponentField = (
+    assemblyId: string,
+    componentId: string,
+    field: "requirement" | "quantityUnit" | "quantityDriver" | "typicalMaterialSystem" | "laborTask" | "notes",
+    value: string,
+  ) => {
+    const next = assembliesState.map((item) => {
+      if (item.id !== assemblyId) return item;
+      const nextComponents = item.components.map((component) => (
+        component.id === componentId ? { ...component, [field]: value } : component
+      )) as Array<AssemblyComponent & { componentStatus: ComponentStatus }>;
+      return {
+        ...item,
+        contractorEdited: true,
+        components: nextComponents,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+
+    persistAssemblies(next);
+    if (!assembliesState.find((item) => item.id === assemblyId)?.contractorEdited) {
+      pushActivity("Assembly component updated");
+    }
+  };
+
+  const toggleAssemblyExpanded = (assemblyId: string) => {
+    setExpandedAssemblies((current) => ({ ...current, [assemblyId]: !current[assemblyId] }));
+  };
+
+  // Title editing
   useEffect(() => {
     if (isEditingTitle) {
       titleInputRef.current?.focus();
@@ -172,33 +269,34 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     setProjectTitle(t);
     setTitleDraft(t);
     setIsEditingTitle(false);
-    try { localStorage.setItem(titleStorageKey, t); } catch {}
+    writeStorageValue(titleStorageKey, t);
     pushActivity('Title changed');
   };
   const cancelTitle = () => { setTitleDraft(projectTitle); setIsEditingTitle(false); };
 
   const getAttrKey = (field: EditingField, index?: number) => index !== undefined ? `${field}:${index}` : field;
-  const getAttribution = (field: EditingField, index: number) => attributionRef.current[getAttrKey(field, index)] ?? 'AI';
+  const getAttribution = (field: EditingField, index: number) => attributionState[getAttrKey(field, index)] ?? 'AI';
   const setItemAttribution = (field: EditingField, index: number, value: 'AI' | 'User') => {
-    attributionRef.current = { ...attributionRef.current, [getAttrKey(field, index)]: value };
-    try { localStorage.setItem(attrStorageKey, JSON.stringify(attributionRef.current)); } catch {}
+    setAttributionState((current) => {
+      const next = { ...current, [getAttrKey(field, index)]: value };
+      writeStorageValue(attrStorageKey, next);
+      return next;
+    });
   };
   const clearAttribution = () => {
-    attributionRef.current = {};
-    try { localStorage.removeItem(attrStorageKey); } catch {}
+    setAttributionState({});
+    try { window.localStorage.removeItem(attrStorageKey); } catch {}
   };
 
   const persistUnderstanding = (next: Partial<ProjectUnderstanding>) => {
     setUserUnderstanding(next);
-    try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch {}
+    writeStorageValue(storageKey, next);
   };
 
   const beginEdit = (field: EditingField, index: number) => {
     const currentValue = field === 'projectType'
       ? understanding.projectType
-      : (understanding as any)[field]?.[index] ?? '';
-
-    setEditingItem({ field, index });
+      : (understanding[field] as string[] | undefined)?.[index] ?? '';
     setEditingValue(currentValue);
   };
 
@@ -215,7 +313,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     if (editingItem.field === 'projectType') {
       persistUnderstanding({ ...userUnderstanding, projectType: value });
     } else {
-      const currentArray = ((userUnderstanding as any)[editingItem.field] ?? (aiUnderstanding as any)[editingItem.field] ?? []) as string[];
+      const currentArray = ((userUnderstanding[editingItem.field] ?? aiUnderstanding[editingItem.field]) ?? []) as string[];
       const nextArray = [...currentArray];
       nextArray[editingItem.index] = value;
       persistUnderstanding({ ...userUnderstanding, [editingItem.field]: nextArray });
@@ -243,11 +341,11 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     Array.from(files).forEach((f) => form.append('files', f));
     try {
       const res = await fetch(`/api/projects/${encodeURIComponent(projectName)}/files`, { method: 'POST', body: form });
-      const data = await res.json();
-      const newFiles = (data.files ?? []).map((f: any) => ({ id: `${f.name}-${f.size}-${Date.now()}`, filename: f.name, type: f.type, size: f.size, uploadedAt: new Date().toISOString() }));
+      const data = await res.json() as { files?: Array<{ name: string; size: number; type: string }> };
+      const newFiles = (data.files ?? []).map((f) => ({ id: `${f.name}-${f.size}-${Date.now()}`, filename: f.name, type: f.type, size: f.size, uploadedAt: new Date().toISOString() }));
       persistFiles([...(projectFiles ?? []), ...newFiles]);
       pushActivity(`${newFiles.length} file${newFiles.length===1? '':'s'} uploaded`);
-    } catch (e) {
+    } catch {
       // fallback: add locally
       const localFiles = Array.from(files).map((f) => ({ id: `${f.name}-${f.size}-${Date.now()}`, filename: f.name, type: f.type, size: f.size, uploadedAt: new Date().toISOString() }));
       persistFiles([...(projectFiles ?? []), ...localFiles]);
@@ -263,7 +361,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
 
   // Notes debounce
   const saveNotesNow = (value: string) => {
-    try { localStorage.setItem(notesStorageKey, value); } catch {}
+    writeStorageValue(notesStorageKey, value);
     pushActivity('Note updated');
   };
   const handleNotesChange = (v: string) => {
@@ -325,6 +423,115 @@ export default function ProjectPageClient({ projectName }: { projectName: string
         <section style={{ marginBottom: 16 }}>
           <h2 style={{ margin: '0 0 8px', fontSize: 18, fontWeight: 700 }}>Notes</h2>
           <textarea value={notes} onChange={(e)=>handleNotesChange(e.target.value)} placeholder="Add project notes, client instructions, site details or observations..." style={{ width: '100%', minHeight: 120, padding: 12, borderRadius: 8, border: '1px solid #d8cdbc' }} />
+        </section>
+
+        <section style={{ marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Assemblies</h2>
+            <button onClick={() => setShowAssemblyPicker((value) => !value)} style={{ border: '1px solid #d8cdbc', background: '#fffaf2', padding: '10px 14px', borderRadius: 8, cursor: 'pointer' }}>{showAssemblyPicker ? 'Hide picker' : 'Add Assembly'}</button>
+          </div>
+
+          {showAssemblyPicker && (
+            <div style={{ marginTop: 12, background: '#fff', border: '1px solid #e6dac8', padding: 12, borderRadius: 8 }}>
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+                <input value={assemblySearch} onChange={(e) => setAssemblySearch(e.target.value)} placeholder="Search assemblies" style={{ flex: 1, minWidth: 220, padding: 8, borderRadius: 8, border: '1px solid #d8cdbc' }} />
+                <select value={assemblyCategory} onChange={(e) => setAssemblyCategory(e.target.value)} style={{ padding: 8, borderRadius: 8, border: '1px solid #d8cdbc' }}>
+                  {assemblyCategories.map((category) => <option key={category} value={category}>{category}</option>)}
+                </select>
+              </div>
+
+              {availableAssemblies.length === 0 ? (
+                <div style={{ color: '#766b5d' }}>No matching assemblies available.</div>
+              ) : (
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {availableAssemblies.map((assembly) => (
+                    <div key={assembly.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '10px 12px', border: '1px solid #f0e9df', borderRadius: 8 }}>
+                      <div>
+                        <div style={{ fontWeight: 700 }}>{assembly.name}</div>
+                        <div style={{ color: '#766b5d', fontSize: 13 }}>{assembly.category} • {assembly.subcategory}</div>
+                      </div>
+                      <button onClick={() => addAssembly(assembly)} style={{ border: 'none', background: '#594f43', color: '#fff', padding: '8px 12px', borderRadius: 8, cursor: 'pointer' }}>Add</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{ marginTop: 12, display: 'grid', gap: 12 }}>
+            {assembliesState.length === 0 ? (
+              <div style={{ background: '#fff', border: '1px solid #e6dac8', padding: 12, borderRadius: 8, color: '#766b5d' }}>No assemblies added yet.</div>
+            ) : (
+              assembliesState.map((projectAssembly) => {
+                const isExpanded = expandedAssemblies[projectAssembly.id];
+                return (
+                  <div key={projectAssembly.id} style={{ background: '#fff', border: '1px solid #e6dac8', padding: 12, borderRadius: 8 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                      <div>
+                        <div style={{ fontWeight: 700 }}>{projectAssembly.assembly.name}</div>
+                        <div style={{ color: '#766b5d', fontSize: 13 }}>Source ID: {projectAssembly.sourceAssemblyId}</div>
+                      </div>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button onClick={() => toggleAssemblyExpanded(projectAssembly.id)} style={{ border: '1px solid #d8cdbc', background: '#fffaf2', padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>{isExpanded ? 'Collapse' : 'Expand'} </button>
+                        <button onClick={() => removeAssembly(projectAssembly.id)} style={{ border: '1px solid #d8cdbc', background: '#fffaf2', padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>Remove</button>
+                      </div>
+                    </div>
+
+                    <div style={{ marginTop: 10, display: 'grid', gap: 8, color: '#766b5d' }}>
+                      <div><strong>Context/exposure:</strong> {projectAssembly.assembly.projectContext} • {projectAssembly.assembly.moistureExposure}</div>
+                      <div><strong>Required functions:</strong> {projectAssembly.assembly.requiredFunctions.join(', ')}</div>
+                      <div><strong>Common unknowns:</strong> {projectAssembly.assembly.commonUnknowns.join(', ')}</div>
+                      <div><strong>Non-negotiables:</strong> {projectAssembly.assembly.nonNegotiables.join(', ')}</div>
+                    </div>
+
+                    {isExpanded && (
+                      <div style={{ marginTop: 12, display: 'grid', gap: 8 }}>
+                        {projectAssembly.components.map((component) => (
+                          <div key={component.id} style={{ borderTop: '1px solid #f0e9df', paddingTop: 10 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                              <div style={{ fontWeight: 700 }}>{component.componentGroup}</div>
+                              <select value={component.componentStatus} onChange={(e) => updateComponentStatus(projectAssembly.id, component.id, e.target.value as ComponentStatus)} style={{ padding: '6px 8px', borderRadius: 8, border: '1px solid #d8cdbc' }}>
+                                <option value="Included">Included</option>
+                                <option value="Excluded">Excluded</option>
+                                <option value="Optional">Optional</option>
+                                <option value="Unknown">Unknown</option>
+                              </select>
+                            </div>
+                            <div style={{ marginTop: 8, display: 'grid', gap: 8, gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+                              <label style={{ display: 'grid', gap: 4, fontSize: 13 }}>
+                                Requirement
+                                <input value={component.requirement} onChange={(e) => updateComponentField(projectAssembly.id, component.id, 'requirement', e.target.value)} style={{ padding: 8, borderRadius: 8, border: '1px solid #d8cdbc' }} />
+                              </label>
+                              <label style={{ display: 'grid', gap: 4, fontSize: 13 }}>
+                                Quantity unit
+                                <input value={component.quantityUnit} onChange={(e) => updateComponentField(projectAssembly.id, component.id, 'quantityUnit', e.target.value)} style={{ padding: 8, borderRadius: 8, border: '1px solid #d8cdbc' }} />
+                              </label>
+                              <label style={{ display: 'grid', gap: 4, fontSize: 13 }}>
+                                Quantity driver
+                                <input value={component.quantityDriver} onChange={(e) => updateComponentField(projectAssembly.id, component.id, 'quantityDriver', e.target.value)} style={{ padding: 8, borderRadius: 8, border: '1px solid #d8cdbc' }} />
+                              </label>
+                              <label style={{ display: 'grid', gap: 4, fontSize: 13 }}>
+                                Material / system
+                                <input value={component.typicalMaterialSystem} onChange={(e) => updateComponentField(projectAssembly.id, component.id, 'typicalMaterialSystem', e.target.value)} style={{ padding: 8, borderRadius: 8, border: '1px solid #d8cdbc' }} />
+                              </label>
+                              <label style={{ display: 'grid', gap: 4, fontSize: 13 }}>
+                                Labor task
+                                <input value={component.laborTask} onChange={(e) => updateComponentField(projectAssembly.id, component.id, 'laborTask', e.target.value)} style={{ padding: 8, borderRadius: 8, border: '1px solid #d8cdbc' }} />
+                              </label>
+                              <label style={{ display: 'grid', gap: 4, fontSize: 13, gridColumn: '1 / -1' }}>
+                                Notes
+                                <textarea value={component.notes} onChange={(e) => updateComponentField(projectAssembly.id, component.id, 'notes', e.target.value)} style={{ padding: 8, borderRadius: 8, border: '1px solid #d8cdbc', minHeight: 70 }} />
+                              </label>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
         </section>
 
         <section style={{ marginBottom: 16 }}>

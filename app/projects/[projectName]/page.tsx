@@ -1,6 +1,6 @@
 import ProjectPageClient from "./ProjectPageClient";
 
-export default async function ProjectPage({ params }: { params: any }) {
+export default async function ProjectPage({ params }: { params: Promise<{ projectName: string }> }) {
   const { projectName } = await params;
   const decodedProjectName = decodeURIComponent(projectName);
 

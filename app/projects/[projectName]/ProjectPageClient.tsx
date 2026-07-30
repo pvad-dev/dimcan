@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { assemblyComponents as masterAssemblyComponents } from "../../../data/assembly-components";
 import { assemblies as masterAssemblies, type Assembly, type AssemblyComponent, type ComponentStatus, type ProjectAssembly } from "../../../data/assemblies";
 import { recomputeProjectUnderstanding, type ProjectUnderstanding as PrototypeProjectUnderstanding } from "../../../lib/project-understanding";
@@ -12,7 +12,12 @@ type ProjectFileMeta = {
   type: string;
   size: number;
   uploadedAt: string;
+  folder: string;
 };
+
+type FileFilter = "All" | "Drawings" | "Photos" | "Videos" | "Notes" | "Documents";
+
+const INLINE_EXTENSIONS = new Set(["pdf", "jpg", "jpeg", "png", "gif", "webp", "bmp", "svg"]);
 
 type ProjectUnderstanding = PrototypeProjectUnderstanding;
 
@@ -22,6 +27,77 @@ type EditingItem = {
   field: EditingField;
   index: number;
 };
+
+type NoteCategory = "General" | "Client" | "Site" | "Scope" | "Pricing" | "Decision";
+
+type ProjectNote = {
+  id: string;
+  text: string;
+  category: NoteCategory;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ActivityType =
+  | "file-uploaded"
+  | "file-deleted"
+  | "file-renamed"
+  | "file-moved"
+  | "project-title-updated"
+  | "project-notes-updated"
+  | "project-understanding-updated"
+  | "assembly-added"
+  | "assembly-edited"
+  | "assembly-removed"
+  | "project-archived"
+  | "project-restored"
+  | "update"
+  | "decision"
+  | "client-request"
+  | "site-condition"
+  | "project";
+
+type ActivitySource = "system" | "user" | "ai";
+
+type ActivityEntry = {
+  id: string;
+  type: ActivityType;
+  title: string;
+  description: string;
+  timestamp: string;
+  source: ActivitySource;
+  relatedFile: string | null;
+  relatedFolder: string | null;
+  metadata: Record<string, unknown>;
+};
+
+type ActivityFilter = "All" | "Files" | "Notes" | "Decisions" | "Project" | "AI";
+
+type PersistedProjectData = {
+  schemaVersion: number;
+  displayTitle: string;
+  notes: ProjectNote[];
+  activity: ActivityEntry[];
+  assemblies: ProjectAssembly[];
+  understandingOverrides: Partial<ProjectUnderstanding>;
+  attributionData: Record<string, "AI" | "User">;
+  updatedAt: string;
+};
+
+type ProjectDataPatch = Partial<{
+  displayTitle: string;
+  notes: ProjectNote[];
+  activity: ActivityEntry[];
+  assemblies: ProjectAssembly[];
+  understandingOverrides: Partial<ProjectUnderstanding>;
+  attributionData: Record<string, "AI" | "User">;
+}>;
+
+type SaveStatus = "idle" | "saving" | "saved" | "error";
+
+const NOTE_CATEGORIES: NoteCategory[] = ["General", "Client", "Site", "Scope", "Pricing", "Decision"];
+
+const ACTIVITY_FILTERS: ActivityFilter[] = ["All", "Files", "Notes", "Decisions", "Project", "AI"];
 
 const readStorageValue = <T,>(key: string, fallback: T): T => {
   if (typeof window === "undefined") return fallback;
@@ -40,30 +116,135 @@ const writeStorageValue = (key: string, value: unknown) => {
   } catch {}
 };
 
+const makeId = () => {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+};
+
+const toIso = (value?: string) => {
+  if (!value) return new Date().toISOString();
+  const time = Date.parse(value);
+  if (Number.isNaN(time)) return new Date().toISOString();
+  return new Date(time).toISOString();
+};
+
+const activityTypeBadge = (type: ActivityType) => {
+  switch (type) {
+    case "file-uploaded":
+    case "file-deleted":
+    case "file-renamed":
+    case "file-moved":
+      return "Files";
+    case "project-notes-updated":
+      return "Notes";
+    case "decision":
+      return "Decision";
+    case "project-understanding-updated":
+      return "AI";
+    default:
+      return "Project";
+  }
+};
+
+const activityTypeIcon = (type: ActivityType) => {
+  switch (type) {
+    case "file-uploaded":
+      return "⬆";
+    case "file-deleted":
+      return "🗑";
+    case "file-renamed":
+      return "✎";
+    case "file-moved":
+      return "↦";
+    case "project-notes-updated":
+      return "📝";
+    case "decision":
+      return "◆";
+    case "client-request":
+      return "👤";
+    case "site-condition":
+      return "📍";
+    case "project-understanding-updated":
+      return "AI";
+    case "assembly-added":
+    case "assembly-edited":
+    case "assembly-removed":
+      return "⚙";
+    default:
+      return "•";
+  }
+};
+
+const dayLabel = (iso: string) => {
+  const ts = new Date(iso);
+  const now = new Date();
+
+  const startOfTs = new Date(ts.getFullYear(), ts.getMonth(), ts.getDate()).getTime();
+  const startOfNow = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const diffDays = Math.round((startOfNow - startOfTs) / 86400000);
+
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
+
+  return ts.toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+};
+
 export default function ProjectPageClient({ projectName }: { projectName: string }) {
   const storageKey = `dimcan:projectUnderstanding:${projectName}`;
-  const fileStorageKey = `dimcan:projectFiles:${projectName}`;
   const titleStorageKey = `dimcan:projectTitle:${projectName}`;
   const notesStorageKey = `dimcan:projectNotes:${projectName}`;
   const activityStorageKey = `dimcan:projectActivity:${projectName}`;
   const attrStorageKey = `dimcan:projectAttr:${projectName}`;
   const assemblyStorageKey = `dimcan:projectAssemblies:${projectName}`;
+  const migrationKey = `dimcan:projectMigrated:${projectName}`;
 
-  const [projectTitle, setProjectTitle] = useState(() => readStorageValue(titleStorageKey, projectName));
-  const [titleDraft, setTitleDraft] = useState(() => readStorageValue(titleStorageKey, projectName));
+  const [projectTitle, setProjectTitle] = useState(projectName);
+  const [titleDraft, setTitleDraft] = useState(projectName);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [projectFiles, setProjectFiles] = useState<ProjectFileMeta[]>(() => readStorageValue<ProjectFileMeta[]>(fileStorageKey, []));
+  const [projectFiles, setProjectFiles] = useState<ProjectFileMeta[]>([]);
+  const [selectedFileFilter, setSelectedFileFilter] = useState<FileFilter>("All");
+  const [isFilesLoading, setIsFilesLoading] = useState(true);
+  const [filesError, setFilesError] = useState<string | null>(null);
+  const [openFileMenuId, setOpenFileMenuId] = useState<string | null>(null);
+  const [hoveredFileRowId, setHoveredFileRowId] = useState<string | null>(null);
+  const [pressedFileRowId, setPressedFileRowId] = useState<string | null>(null);
+  const [focusedFileRowId, setFocusedFileRowId] = useState<string | null>(null);
+  const [sharingFileId, setSharingFileId] = useState<string | null>(null);
+  const [fileActionError, setFileActionError] = useState<string | null>(null);
+  const fileMenuRef = useRef<HTMLDivElement | null>(null);
+  const [isFileDropActive, setIsFileDropActive] = useState(false);
+  const dragDepthRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  const saveStatusTimerRef = useRef<number | null>(null);
 
-  const [notes, setNotes] = useState(() => readStorageValue(notesStorageKey, ""));
-  const notesTimer = useRef<number | null>(null);
+  const [projectNotes, setProjectNotes] = useState<ProjectNote[]>([]);
+  const noteSaveTimersRef = useRef<Record<string, number>>({});
+  const [newNoteText, setNewNoteText] = useState("");
+  const [newNoteCategory, setNewNoteCategory] = useState<NoteCategory>("General");
+  const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
+  const noteEditOriginalRef = useRef<Record<string, string>>({});
+  const [openNoteMenuId, setOpenNoteMenuId] = useState<string | null>(null);
 
-  const [activity, setActivity] = useState<string[]>(() => readStorageValue<string[]>(activityStorageKey, []));
-  const [activityOpen, setActivityOpen] = useState(false);
+  const [activity, setActivity] = useState<ActivityEntry[]>([]);
+  const [activityFilter, setActivityFilter] = useState<ActivityFilter>("All");
+  const [expandedActivityIds, setExpandedActivityIds] = useState<Record<string, boolean>>({});
+  const [openActivityMenuId, setOpenActivityMenuId] = useState<string | null>(null);
+  const [showManualUpdateForm, setShowManualUpdateForm] = useState(false);
+  const [manualUpdateType, setManualUpdateType] = useState<"update" | "decision" | "client-request" | "site-condition">("update");
+  const [manualUpdateTitle, setManualUpdateTitle] = useState("");
+  const [manualUpdateDescription, setManualUpdateDescription] = useState("");
 
-  const [assembliesState, setAssembliesState] = useState<ProjectAssembly[]>(() => readStorageValue<ProjectAssembly[]>(assemblyStorageKey, []));
+  const [assembliesState, setAssembliesState] = useState<ProjectAssembly[]>([]);
   const [showAssemblyPicker, setShowAssemblyPicker] = useState(false);
   const [assemblySearch, setAssemblySearch] = useState("");
   const [assemblyCategory, setAssemblyCategory] = useState("All");
@@ -76,11 +257,16 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   const [missingOpen, setMissingOpen] = useState(false);
   const [showPrototypeDetails, setShowPrototypeDetails] = useState(false);
 
-  const [userUnderstanding, setUserUnderstanding] = useState<Partial<ProjectUnderstanding>>(() => readStorageValue<Partial<ProjectUnderstanding>>(storageKey, {}));
+  const combinedNotesText = useMemo(
+    () => projectNotes.map((note) => note.text.trim()).filter(Boolean).join("\n"),
+    [projectNotes],
+  );
+
+  const [userUnderstanding, setUserUnderstanding] = useState<Partial<ProjectUnderstanding>>({});
   const understanding = useMemo<ProjectUnderstanding>(() => {
     const prototype = recomputeProjectUnderstanding({
       projectName: projectTitle,
-      notes,
+      notes: combinedNotesText,
       files: projectFiles,
       assemblies: assembliesState.map((item) => ({ assembly: { name: item.assembly.name }, sourceAssemblyId: item.sourceAssemblyId })),
     });
@@ -99,11 +285,38 @@ export default function ProjectPageClient({ projectName }: { projectName: string
       scope: userUnderstanding.scope ?? prototype.scope,
       suggestedProjectName: userUnderstanding.suggestedProjectName ?? prototype.suggestedProjectName,
     };
-  }, [assembliesState, notes, projectFiles, projectTitle, userUnderstanding]);
+  }, [assembliesState, combinedNotesText, projectFiles, projectTitle, userUnderstanding]);
 
-  const [attributionState, setAttributionState] = useState<Record<string, "AI" | "User">>(() => readStorageValue<Record<string, "AI" | "User">>(attrStorageKey, {}));
+  const [attributionState, setAttributionState] = useState<Record<string, "AI" | "User">>({});
 
   const assemblyCategories = useMemo(() => ["All", ...Array.from(new Set(masterAssemblies.map((assembly) => assembly.category)))], []);
+  const fileFilters = useMemo<FileFilter[]>(() => ["All", "Drawings", "Photos", "Videos", "Notes", "Documents"], []);
+  const fileFilterCounts = useMemo<Record<FileFilter, number>>(() => {
+    const counts: Record<FileFilter, number> = {
+      All: projectFiles.length,
+      Drawings: 0,
+      Photos: 0,
+      Videos: 0,
+      Notes: 0,
+      Documents: 0,
+    };
+
+    for (const file of projectFiles) {
+      const folder = file.folder as FileFilter;
+      if (folder in counts) {
+        counts[folder] += 1;
+      }
+    }
+
+    return counts;
+  }, [projectFiles]);
+  const visibleProjectFiles = useMemo(() => {
+    if (selectedFileFilter === "All") {
+      return projectFiles;
+    }
+
+    return projectFiles.filter((file) => file.folder === selectedFileFilter);
+  }, [projectFiles, selectedFileFilter]);
   const availableAssemblies = useMemo(() => {
     const addedAssemblyIds = new Set(assembliesState.map((assembly) => assembly.sourceAssemblyId));
     const normalizedSearch = assemblySearch.trim().toLowerCase();
@@ -119,23 +332,309 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     });
   }, [assemblyCategory, assemblySearch, assembliesState]);
 
-  const persistFiles = (files: ProjectFileMeta[]) => {
-    setProjectFiles(files);
-    writeStorageValue(fileStorageKey, files);
-  };
+  const activityByFilter = useMemo(() => {
+    if (activityFilter === "All") {
+      return activity;
+    }
 
-  const pushActivity = (text: string) => {
-    const entry = `${text} — ${new Date().toLocaleString()}`;
+    return activity.filter((entry) => {
+      if (activityFilter === "Files") {
+        return entry.type.startsWith("file-");
+      }
+      if (activityFilter === "Notes") {
+        return entry.type === "project-notes-updated";
+      }
+      if (activityFilter === "Decisions") {
+        return entry.type === "decision";
+      }
+      if (activityFilter === "Project") {
+        return entry.source !== "ai";
+      }
+      if (activityFilter === "AI") {
+        return entry.source === "ai" || entry.type === "project-understanding-updated";
+      }
+      return true;
+    });
+  }, [activity, activityFilter]);
+
+  const groupedActivity = useMemo(() => {
+    const groups = new Map<string, ActivityEntry[]>();
+    for (const entry of activityByFilter) {
+      const label = dayLabel(entry.timestamp);
+      const group = groups.get(label) ?? [];
+      group.push(entry);
+      groups.set(label, group);
+    }
+    return Array.from(groups.entries());
+  }, [activityByFilter]);
+
+  const findProjectFile = useCallback((filename: string | null, folder: string | null) => {
+    if (!filename || !folder) {
+      return null;
+    }
+    return projectFiles.find((file) => file.filename === filename && file.folder === folder) ?? null;
+  }, [projectFiles]);
+
+  function openActivityRelatedFile(entry: ActivityEntry) {
+    const file = findProjectFile(entry.relatedFile, entry.relatedFolder);
+    if (!file) {
+      return;
+    }
+    setFileActionError(null);
+    openProjectFile(file, "preview", false);
+  }
+
+  const setSaveStatusWithTimeout = useCallback((nextStatus: SaveStatus) => {
+    setSaveStatus(nextStatus);
+
+    if (saveStatusTimerRef.current) {
+      window.clearTimeout(saveStatusTimerRef.current);
+      saveStatusTimerRef.current = null;
+    }
+
+    if (nextStatus === "saved") {
+      saveStatusTimerRef.current = window.setTimeout(() => {
+        setSaveStatus("idle");
+        saveStatusTimerRef.current = null;
+      }, 1200) as unknown as number;
+    }
+  }, []);
+
+  const getLocalFallbackProjectData = useCallback(() => {
+    const localDisplayTitle = readStorageValue(titleStorageKey, projectName);
+    const localNotes = readStorageValue<ProjectNote[] | string>(notesStorageKey, []);
+    const localActivity = readStorageValue<ActivityEntry[] | string[]>(activityStorageKey, []);
+    const localAssemblies = readStorageValue<ProjectAssembly[]>(assemblyStorageKey, []);
+    const localUnderstanding = readStorageValue<Partial<ProjectUnderstanding>>(storageKey, {});
+    const localAttribution = readStorageValue<Record<string, "AI" | "User">>(attrStorageKey, {});
+
+    const normalizedLocalNotes = Array.isArray(localNotes)
+      ? localNotes
+      : typeof localNotes === "string" && localNotes.trim()
+        ? [{ id: makeId(), text: localNotes.trim(), category: "General" as const, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }]
+        : [];
+
+    const normalizedLocalActivity = Array.isArray(localActivity)
+      ? localActivity.map((entry) => {
+          if (typeof entry === "string") {
+            return {
+              id: makeId(),
+              type: "project" as const,
+              title: "Legacy activity",
+              description: entry,
+              timestamp: new Date().toISOString(),
+              source: "system" as const,
+              relatedFile: null,
+              relatedFolder: null,
+              metadata: { migratedFrom: "string" },
+            };
+          }
+          return {
+            ...entry,
+            id: entry.id || makeId(),
+            timestamp: toIso(entry.timestamp),
+            metadata: entry.metadata && typeof entry.metadata === "object" ? entry.metadata : {},
+          };
+        })
+      : [];
+
+    const patch: ProjectDataPatch = {
+      displayTitle: localDisplayTitle,
+      notes: normalizedLocalNotes,
+      activity: normalizedLocalActivity,
+      assemblies: localAssemblies,
+      understandingOverrides: localUnderstanding,
+      attributionData: localAttribution,
+    };
+
+    const hasData =
+      localDisplayTitle.trim() !== "" && localDisplayTitle !== projectName
+        ? true
+        : normalizedLocalNotes.length > 0 ||
+          normalizedLocalActivity.length > 0 ||
+          localAssemblies.length > 0 ||
+          Object.keys(localUnderstanding).length > 0 ||
+          Object.keys(localAttribution).length > 0;
+
+    return {
+      patch,
+      hasData,
+    };
+  }, [activityStorageKey, assemblyStorageKey, attrStorageKey, notesStorageKey, projectName, storageKey, titleStorageKey]);
+
+  const applyProjectData = useCallback((project: PersistedProjectData) => {
+    const safeTitle = (project.displayTitle || projectName).trim() || projectName;
+
+    setProjectTitle(safeTitle);
+    setTitleDraft(safeTitle);
+    setProjectNotes(Array.isArray(project.notes) ? project.notes : []);
+    setActivity(Array.isArray(project.activity) ? project.activity : []);
+    setAssembliesState(Array.isArray(project.assemblies) ? project.assemblies : []);
+    setUserUnderstanding(
+      project.understandingOverrides && typeof project.understandingOverrides === "object"
+        ? project.understandingOverrides
+        : {},
+    );
+    setAttributionState(
+      project.attributionData && typeof project.attributionData === "object"
+        ? project.attributionData
+        : {},
+    );
+  }, [projectName]);
+
+  const saveProjectPatch = useCallback(async (patch: ProjectDataPatch) => {
+    setSaveStatusWithTimeout("saving");
+
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectName)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+
+      const data = await res.json() as { message?: string };
+      if (!res.ok) {
+        throw new Error(data.message || "Failed to save project data.");
+      }
+
+      setSaveStatusWithTimeout("saved");
+    } catch {
+      setSaveStatusWithTimeout("error");
+    }
+  }, [projectName, setSaveStatusWithTimeout]);
+
+  const loadProjectData = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectName)}`, {
+        method: "GET",
+        cache: "no-store",
+      });
+      const data = await res.json() as {
+        project?: PersistedProjectData;
+        isEmpty?: boolean;
+        message?: string;
+      };
+
+      if (!res.ok || !data.project) {
+        throw new Error(data.message || "Failed to load project data.");
+      }
+
+      let effectiveProject = data.project;
+      const migrationDone = readStorageValue<boolean>(migrationKey, false);
+      const fallbackLocal = getLocalFallbackProjectData();
+
+      if (!migrationDone && data.isEmpty && fallbackLocal.hasData) {
+        const migrateRes = await fetch(`/api/projects/${encodeURIComponent(projectName)}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(fallbackLocal.patch),
+        });
+
+        if (migrateRes.ok) {
+          const migrateData = await migrateRes.json() as { project?: PersistedProjectData };
+          if (migrateData.project) {
+            effectiveProject = migrateData.project;
+            writeStorageValue(migrationKey, true);
+          }
+        }
+      }
+
+      applyProjectData(effectiveProject);
+      writeStorageValue(titleStorageKey, effectiveProject.displayTitle);
+      writeStorageValue(notesStorageKey, effectiveProject.notes);
+      writeStorageValue(activityStorageKey, effectiveProject.activity);
+      writeStorageValue(assemblyStorageKey, effectiveProject.assemblies);
+      writeStorageValue(storageKey, effectiveProject.understandingOverrides);
+      writeStorageValue(attrStorageKey, effectiveProject.attributionData);
+    } catch {
+      const fallbackLocal = getLocalFallbackProjectData();
+      applyProjectData({
+        schemaVersion: 2,
+        displayTitle: fallbackLocal.patch.displayTitle || projectName,
+        notes: fallbackLocal.patch.notes || [],
+        activity: fallbackLocal.patch.activity || [],
+        assemblies: fallbackLocal.patch.assemblies || [],
+        understandingOverrides: fallbackLocal.patch.understandingOverrides || {},
+        attributionData: fallbackLocal.patch.attributionData || {},
+        updatedAt: new Date().toISOString(),
+      });
+      setSaveStatus("error");
+    }
+  }, [activityStorageKey, applyProjectData, assemblyStorageKey, attrStorageKey, getLocalFallbackProjectData, migrationKey, notesStorageKey, projectName, storageKey, titleStorageKey]);
+
+  const loadProjectFiles = useCallback(async () => {
+    setIsFilesLoading(true);
+    setFilesError(null);
+
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectName)}/files`, {
+        method: 'GET',
+        cache: 'no-store',
+      });
+      const data = await res.json() as { files?: ProjectFileMeta[]; message?: string };
+
+      if (!res.ok) {
+        throw new Error(data.message || 'Failed to load files');
+      }
+
+      setProjectFiles(Array.isArray(data.files) ? data.files : []);
+    } catch {
+      setFilesError('Failed to load project files.');
+    } finally {
+      setIsFilesLoading(false);
+    }
+  }, [projectName]);
+
+  const appendActivity = useCallback((entry: Omit<ActivityEntry, "id" | "timestamp"> & { id?: string; timestamp?: string }) => {
     setActivity((current) => {
-      const next = [...current, entry];
+      const normalized: ActivityEntry = {
+        id: entry.id || makeId(),
+        type: entry.type,
+        title: entry.title.trim() || "Project update",
+        description: entry.description.trim(),
+        timestamp: entry.timestamp ? toIso(entry.timestamp) : new Date().toISOString(),
+        source: entry.source,
+        relatedFile: entry.relatedFile ?? null,
+        relatedFolder: entry.relatedFolder ?? null,
+        metadata: entry.metadata || {},
+      };
+
+      const duplicate = current.some((item) => (
+        item.type === normalized.type &&
+        item.title === normalized.title &&
+        item.description === normalized.description &&
+        item.relatedFile === normalized.relatedFile &&
+        item.relatedFolder === normalized.relatedFolder &&
+        Math.abs(Date.parse(item.timestamp) - Date.parse(normalized.timestamp)) < 1500
+      ));
+
+      if (duplicate) {
+        return current;
+      }
+
+      const next = [normalized, ...current].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
       writeStorageValue(activityStorageKey, next);
+      void saveProjectPatch({ activity: next });
       return next;
     });
-  };
+  }, [activityStorageKey, saveProjectPatch]);
+
+  const appendProjectActivity = useCallback((type: ActivityType, title: string, description = "", metadata: Record<string, unknown> = {}) => {
+    appendActivity({
+      type,
+      title,
+      description,
+      source: type === "project-understanding-updated" ? "ai" : "system",
+      relatedFile: null,
+      relatedFolder: null,
+      metadata,
+    });
+  }, [appendActivity]);
 
   const persistAssemblies = (next: ProjectAssembly[]) => {
     setAssembliesState(next);
     writeStorageValue(assemblyStorageKey, next);
+    void saveProjectPatch({ assemblies: next });
   };
 
   const addAssembly = (assembly: Assembly) => {
@@ -162,7 +661,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
 
     const next = [...assembliesState, projectAssembly];
     persistAssemblies(next);
-    pushActivity(`Assembly added: ${assembly.name}`);
+    appendProjectActivity("assembly-added", "Assembly added", assembly.name, { assemblyId: assembly.id });
     setShowAssemblyPicker(false);
   };
 
@@ -171,7 +670,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
 
     const next = assembliesState.filter((item) => item.id !== assemblyId);
     persistAssemblies(next);
-    pushActivity("Assembly removed");
+    appendProjectActivity("assembly-removed", "Assembly removed", "A project assembly was removed.", { assemblyId });
   };
 
   const updateComponentStatus = (assemblyId: string, componentId: string, componentStatus: ComponentStatus) => {
@@ -190,7 +689,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
 
     persistAssemblies(next);
     if (!assembliesState.find((item) => item.id === assemblyId)?.contractorEdited) {
-      pushActivity("Assembly component updated");
+      appendProjectActivity("assembly-edited", "Assembly edited", "Assembly component status updated.", { assemblyId, componentId });
     }
   };
 
@@ -215,7 +714,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
 
     persistAssemblies(next);
     if (!assembliesState.find((item) => item.id === assemblyId)?.contractorEdited) {
-      pushActivity("Assembly component updated");
+      appendProjectActivity("assembly-edited", "Assembly edited", `Assembly field updated: ${field}.`, { assemblyId, componentId, field });
     }
   };
 
@@ -237,7 +736,8 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     setTitleDraft(t);
     setIsEditingTitle(false);
     writeStorageValue(titleStorageKey, t);
-    pushActivity('Title changed');
+    void saveProjectPatch({ displayTitle: t });
+    appendProjectActivity("project-title-updated", "Project title changed", t);
   };
   const cancelTitle = () => { setTitleDraft(projectTitle); setIsEditingTitle(false); };
 
@@ -247,23 +747,26 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     setAttributionState((current) => {
       const next = { ...current, [getAttrKey(field, index)]: value };
       writeStorageValue(attrStorageKey, next);
+      void saveProjectPatch({ attributionData: next });
       return next;
     });
   };
   const clearAttribution = () => {
     setAttributionState({});
-    try { window.localStorage.removeItem(attrStorageKey); } catch {}
+    writeStorageValue(attrStorageKey, {});
+    void saveProjectPatch({ attributionData: {} });
   };
 
   const persistUnderstanding = (next: Partial<ProjectUnderstanding>) => {
     setUserUnderstanding(next);
     writeStorageValue(storageKey, next);
+    void saveProjectPatch({ understandingOverrides: next });
   };
 
   const refreshUnderstanding = () => {
     const next = recomputeProjectUnderstanding({
       projectName: projectTitle,
-      notes,
+      notes: combinedNotesText,
       files: projectFiles,
       assemblies: assembliesState.map((item) => ({ assembly: { name: item.assembly.name }, sourceAssemblyId: item.sourceAssemblyId })),
     });
@@ -283,7 +786,8 @@ export default function ProjectPageClient({ projectName }: { projectName: string
       suggestedProjectName: next.suggestedProjectName,
     });
     writeStorageValue(storageKey, next);
-    pushActivity('Understanding refreshed');
+    void saveProjectPatch({ understandingOverrides: next });
+    appendProjectActivity("project-understanding-updated", "Project understanding updated", "Understanding was recomputed from current project inputs.");
   };
 
   const beginEdit = (field: EditingField, index: number) => {
@@ -313,7 +817,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     }
 
     setItemAttribution(editingItem.field, editingItem.index, 'User');
-    pushActivity('Project understanding item edited');
+    appendProjectActivity("project-understanding-updated", "Project understanding edited", `${editingItem.field} item updated by user.`);
     setEditingItem(null);
     setEditingValue('');
   };
@@ -325,49 +829,502 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     }
   }, [editingItem]);
 
+  useEffect(() => {
+    void loadProjectData();
+  }, [loadProjectData]);
+
+  useEffect(() => {
+    void loadProjectFiles();
+  }, [loadProjectFiles]);
+
+  useEffect(() => {
+    return () => {
+      if (saveStatusTimerRef.current) {
+        window.clearTimeout(saveStatusTimerRef.current);
+      }
+      for (const timerId of Object.values(noteSaveTimersRef.current)) {
+        window.clearTimeout(timerId);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const closeMenuOnOutsideClick = (event: MouseEvent | TouchEvent) => {
+      if (!fileMenuRef.current) {
+        return;
+      }
+
+      const target = event.target as Node | null;
+      if (target && !fileMenuRef.current.contains(target)) {
+        setOpenFileMenuId(null);
+      }
+    };
+
+    window.addEventListener('mousedown', closeMenuOnOutsideClick);
+    window.addEventListener('touchstart', closeMenuOnOutsideClick);
+
+    return () => {
+      window.removeEventListener('mousedown', closeMenuOnOutsideClick);
+      window.removeEventListener('touchstart', closeMenuOnOutsideClick);
+    };
+  }, []);
+
   // Files upload/delete
   const openFilePicker = () => fileInputRef.current?.click();
+
+  const handleFileDragEnter = (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setIsFileDropActive(true);
+  };
+
+  const handleFileDragOver = (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+  };
+
+  const handleFileDragLeave = (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsFileDropActive(false);
+    }
+  };
+
+  const handleFileDrop = (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = 0;
+    setIsFileDropActive(false);
+    void handleFiles(event.dataTransfer.files);
+  };
+
+  const getFileOpenHref = (file: ProjectFileMeta) => {
+    const search = new URLSearchParams({
+      folder: file.folder,
+      filename: file.filename,
+    });
+    return `/api/projects/${encodeURIComponent(projectName)}/files?${search.toString()}`;
+  };
+
+  const shouldOpenFileInTab = (file: ProjectFileMeta) => {
+    const type = (file.type || "").toLowerCase();
+    if (type.startsWith("image/") || type === "application/pdf") {
+      return true;
+    }
+
+    const extension = file.filename.split('.').pop()?.toLowerCase() || "";
+    return INLINE_EXTENSIONS.has(extension);
+  };
+
+  const openProjectFile = (file: ProjectFileMeta, mode: 'preview' | 'browser' | 'download' = 'preview', trackActivity = true) => {
+    const href = getFileOpenHref(file);
+    const openInTab = shouldOpenFileInTab(file);
+
+    if (trackActivity) {
+      appendActivity({
+        type: "project",
+        title:
+          mode === "download"
+            ? "File downloaded"
+            : mode === "browser"
+              ? "File opened in browser"
+              : openInTab
+                ? "File opened"
+                : "File downloaded",
+        description: `${file.filename} from ${file.folder}.`,
+        source: "user",
+        relatedFile: file.filename,
+        relatedFolder: file.folder,
+        metadata: { action: mode },
+      });
+    }
+
+    if (mode === 'download') {
+      const link = document.createElement('a');
+      link.href = href;
+      link.download = file.filename;
+      link.rel = 'noopener noreferrer';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      return;
+    }
+
+    if (mode === 'browser') {
+      window.open(href, '_blank', 'noopener,noreferrer');
+      return;
+    }
+
+    if (openInTab) {
+      window.location.href = href;
+      return;
+    }
+
+    const link = document.createElement('a');
+    link.href = href;
+    link.download = file.filename;
+    link.rel = 'noopener noreferrer';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const shareProjectFile = async (file: ProjectFileMeta) => {
+    setFileActionError(null);
+    setSharingFileId(file.id);
+
+    try {
+      const href = getFileOpenHref(file);
+      const absoluteUrl = new URL(href, window.location.origin).toString();
+
+      if (typeof navigator.share !== 'function') {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(absoluteUrl);
+          appendActivity({
+            type: "project",
+            title: "File share link copied",
+            description: `${file.filename} link copied to clipboard.`,
+            source: "user",
+            relatedFile: file.filename,
+            relatedFolder: file.folder,
+            metadata: { method: "clipboard" },
+          });
+          return;
+        }
+
+        throw new Error('Sharing is not supported on this device.');
+      }
+
+      const response = await fetch(href, { method: 'GET', cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error('Could not load file for sharing.');
+      }
+
+      const blob = await response.blob();
+      const shareFile = new File([blob], file.filename, {
+        type: blob.type || file.type || 'application/octet-stream',
+      });
+
+      const canShareFiles =
+        typeof navigator.canShare === 'function' &&
+        navigator.canShare({ files: [shareFile] });
+
+      if (canShareFiles) {
+        await navigator.share({
+          title: file.filename,
+          files: [shareFile],
+        });
+        appendActivity({
+          type: "project",
+          title: "File shared",
+          description: `${file.filename} shared from ${file.folder}.`,
+          source: "user",
+          relatedFile: file.filename,
+          relatedFolder: file.folder,
+          metadata: { method: "native-share-file" },
+        });
+        return;
+      }
+
+      await navigator.share({
+        title: file.filename,
+        url: absoluteUrl,
+      });
+      appendActivity({
+        type: "project",
+        title: "File shared",
+        description: `${file.filename} shared from ${file.folder}.`,
+        source: "user",
+        relatedFile: file.filename,
+        relatedFolder: file.folder,
+        metadata: { method: "native-share-url" },
+      });
+    } catch (error) {
+      const isAbortError =
+        typeof error === 'object' &&
+        error !== null &&
+        'name' in error &&
+        (error as { name?: string }).name === 'AbortError';
+
+      if (!isAbortError) {
+        try {
+          const href = getFileOpenHref(file);
+          const absoluteUrl = new URL(href, window.location.origin).toString();
+
+          if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(absoluteUrl);
+            appendActivity({
+              type: "project",
+              title: "File share link copied",
+              description: `${file.filename} link copied to clipboard.`,
+              source: "user",
+              relatedFile: file.filename,
+              relatedFolder: file.folder,
+              metadata: { method: "clipboard-fallback" },
+            });
+          } else {
+            throw new Error('Could not share this file.');
+          }
+        } catch {
+          setFileActionError('Could not share this file.');
+        }
+      }
+    } finally {
+      setSharingFileId(null);
+    }
+  };
+
+  const confirmAndDeleteFile = async (file: ProjectFileMeta) => {
+    const confirmed = window.confirm(`Delete ${file.filename} from ${file.folder}?`);
+    if (!confirmed) {
+      return;
+    }
+
+    setOpenFileMenuId(null);
+    await deleteFile(file);
+  };
 
   const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     const form = new FormData();
     Array.from(files).forEach((f) => form.append('files', f));
+    setFilesError(null);
+
     try {
       const res = await fetch(`/api/projects/${encodeURIComponent(projectName)}/files`, { method: 'POST', body: form });
-      const data = await res.json() as { files?: Array<{ name: string; size: number; type: string }> };
-      const newFiles = (data.files ?? []).map((f) => ({ id: `${f.name}-${f.size}-${Date.now()}`, filename: f.name, type: f.type, size: f.size, uploadedAt: new Date().toISOString() }));
-      persistFiles([...(projectFiles ?? []), ...newFiles]);
-      pushActivity(`${newFiles.length} file${newFiles.length===1? '':'s'} uploaded`);
+      const data = await res.json() as {
+        files?: Array<Pick<ProjectFileMeta, "filename" | "folder" | "size">>;
+        message?: string;
+      };
+
+      if (!res.ok) {
+        throw new Error(data.message || 'Failed to upload files');
+      }
+
+      await loadProjectFiles();
+
+      const uploadedFromApi = Array.isArray(data.files) ? data.files : [];
+      if (uploadedFromApi.length > 0) {
+        for (const uploaded of uploadedFromApi) {
+          appendActivity({
+            type: "file-uploaded",
+            title: "File uploaded",
+            description: `${uploaded.filename} uploaded to ${uploaded.folder}.`,
+            source: "user",
+            relatedFile: uploaded.filename,
+            relatedFolder: uploaded.folder,
+            metadata: { size: uploaded.size },
+          });
+        }
+      } else {
+        appendActivity({
+          type: "file-uploaded",
+          title: files.length === 1 ? "File uploaded" : `${files.length} files uploaded`,
+          description: files.length === 1 ? "A file was uploaded to the project." : "Multiple files were uploaded to the project.",
+          source: "user",
+          relatedFile: files.length === 1 ? files[0]?.name ?? null : null,
+          relatedFolder: null,
+          metadata: { count: files.length },
+        });
+      }
     } catch {
-      // fallback: add locally
-      const localFiles = Array.from(files).map((f) => ({ id: `${f.name}-${f.size}-${Date.now()}`, filename: f.name, type: f.type, size: f.size, uploadedAt: new Date().toISOString() }));
-      persistFiles([...(projectFiles ?? []), ...localFiles]);
-      pushActivity(`${localFiles.length} file${localFiles.length===1? '':'s'} added (local)`);
+      setFilesError('Failed to upload files.');
     }
   };
 
-  const deleteFile = (id: string) => {
-    const next = projectFiles.filter((f) => f.id !== id);
-    persistFiles(next);
-    pushActivity('File deleted');
+  const deleteFile = async (file: ProjectFileMeta) => {
+    setFilesError(null);
+
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectName)}/files`, {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ filename: file.filename, folder: file.folder }),
+      });
+      const data = await res.json() as { message?: string };
+
+      if (!res.ok) {
+        throw new Error(data.message || 'Failed to delete file');
+      }
+
+      await loadProjectFiles();
+      appendActivity({
+        type: "file-deleted",
+        title: "File deleted",
+        description: `${file.filename} was deleted from ${file.folder}.`,
+        source: "user",
+        relatedFile: file.filename,
+        relatedFolder: file.folder,
+        metadata: {},
+      });
+    } catch {
+      setFilesError('Failed to delete file.');
+    }
   };
 
-  // Notes debounce
-  const saveNotesNow = (value: string) => {
-    writeStorageValue(notesStorageKey, value);
-    pushActivity('Note updated');
+  const saveNotesSnapshot = useCallback((nextNotes: ProjectNote[]) => {
+    writeStorageValue(notesStorageKey, nextNotes);
+    void saveProjectPatch({ notes: nextNotes });
+  }, [notesStorageKey, saveProjectPatch]);
+
+  const addNote = () => {
+    const text = newNoteText.trim();
+    if (!text) {
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const newNote: ProjectNote = {
+      id: makeId(),
+      text,
+      category: newNoteCategory,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    setProjectNotes((current) => {
+      const next = [newNote, ...current];
+      saveNotesSnapshot(next);
+      return next;
+    });
+
+    appendActivity({
+      type: "project-notes-updated",
+      title: "Note added",
+      description: text.slice(0, 140),
+      source: "user",
+      relatedFile: null,
+      relatedFolder: null,
+      metadata: { category: newNoteCategory, noteId: newNote.id },
+    });
+
+    setNewNoteText("");
+    setNewNoteCategory("General");
   };
-  const handleNotesChange = (v: string) => {
-    setNotes(v);
-    if (notesTimer.current) window.clearTimeout(notesTimer.current);
-    notesTimer.current = window.setTimeout(() => { saveNotesNow(v); notesTimer.current = null; }, 400) as unknown as number;
+
+  const beginNoteEdit = (note: ProjectNote) => {
+    noteEditOriginalRef.current[note.id] = note.text;
+    setEditingNoteId(note.id);
+  };
+
+  const finishNoteEdit = (note: ProjectNote) => {
+    const original = noteEditOriginalRef.current[note.id] ?? "";
+    const current = note.text.trim();
+    const previous = original.trim();
+
+    if (current && current !== previous) {
+      appendActivity({
+        type: "project-notes-updated",
+        title: "Note edited",
+        description: "A project note was updated.",
+        source: "user",
+        relatedFile: null,
+        relatedFolder: null,
+        metadata: { noteId: note.id },
+      });
+    }
+
+    delete noteEditOriginalRef.current[note.id];
+    setEditingNoteId((currentId) => (currentId === note.id ? null : currentId));
+  };
+
+  const updateNoteText = (noteId: string, text: string) => {
+    setProjectNotes((current) => current.map((note) => (
+      note.id === noteId
+        ? { ...note, text, updatedAt: new Date().toISOString() }
+        : note
+    )));
+
+    const activeTimer = noteSaveTimersRef.current[noteId];
+    if (activeTimer) {
+      window.clearTimeout(activeTimer);
+    }
+
+    noteSaveTimersRef.current[noteId] = window.setTimeout(() => {
+      setProjectNotes((latest) => {
+        saveNotesSnapshot(latest);
+        return latest;
+      });
+      delete noteSaveTimersRef.current[noteId];
+    }, 500) as unknown as number;
+  };
+
+  const updateNoteCategory = (noteId: string, category: NoteCategory) => {
+    setProjectNotes((current) => {
+      const next = current.map((note) => (
+        note.id === noteId
+          ? { ...note, category, updatedAt: new Date().toISOString() }
+          : note
+      ));
+      saveNotesSnapshot(next);
+      return next;
+    });
+
+    appendActivity({
+      type: "project-notes-updated",
+      title: "Note category changed",
+      description: `A note was moved to ${category}.`,
+      source: "user",
+      relatedFile: null,
+      relatedFolder: null,
+      metadata: { noteId, category },
+    });
+  };
+
+  const deleteNote = (noteId: string) => {
+    if (!window.confirm("Delete this note?")) {
+      return;
+    }
+
+    setProjectNotes((current) => {
+      const next = current.filter((note) => note.id !== noteId);
+      saveNotesSnapshot(next);
+      return next;
+    });
+
+    appendActivity({
+      type: "project-notes-updated",
+      title: "Note deleted",
+      description: "A note was removed from the project.",
+      source: "user",
+      relatedFile: null,
+      relatedFolder: null,
+      metadata: { noteId },
+    });
+
+    setOpenNoteMenuId(null);
+  };
+
+  const addManualActivity = () => {
+    const title = manualUpdateTitle.trim();
+    const description = manualUpdateDescription.trim();
+    if (!title) {
+      return;
+    }
+
+    appendActivity({
+      type: manualUpdateType,
+      title,
+      description,
+      source: "user",
+      relatedFile: null,
+      relatedFolder: null,
+      metadata: {},
+    });
+
+    setShowManualUpdateForm(false);
+    setManualUpdateType("update");
+    setManualUpdateTitle("");
+    setManualUpdateDescription("");
   };
 
   const [showEstimate, setShowEstimate] = useState(false);
 
   return (
-    <main style={{ minHeight: '100vh', background: '#f4efe5', color: '#2f2a24', padding: '28px', fontFamily: 'Arial, sans-serif' }}>
-      <div style={{ width: '100%', maxWidth: 900, margin: '0 auto' }}>
+    <main style={{ minHeight: '100vh', background: '#f4efe5', color: '#2f2a24', padding: 'clamp(12px, 3vw, 28px)', fontFamily: 'Arial, sans-serif' }}>
+      <div style={{ width: '100%', maxWidth: 980, margin: '0 auto' }}>
         <Link href="/" style={{ display: 'inline-block', marginBottom: 18, color: '#766b5d', textDecoration: 'none' }}>← Back to Workspace</Link>
 
         <header style={{ marginBottom: 18 }}>
@@ -377,34 +1334,209 @@ export default function ProjectPageClient({ projectName }: { projectName: string
               <input ref={titleInputRef} value={titleDraft} onChange={(e) => setTitleDraft(e.target.value)} onKeyDown={(e)=>{ if (e.key==='Enter') saveTitle(titleDraft); if (e.key==='Escape') cancelTitle(); }} onBlur={() => saveTitle(titleDraft)} style={{ fontSize: 28, fontWeight: 700, padding: '8px 12px', borderRadius: 10, border: '1px solid #d8cdbc' }} />
             </div>
           ) : (
-            <h1 onClick={() => setIsEditingTitle(true)} style={{ margin: '8px 0 0', fontSize: 32, fontWeight: 700, cursor: 'pointer' }}>{projectTitle}</h1>
+            <h1 onClick={() => setIsEditingTitle(true)} style={{ margin: '8px 0 0', fontSize: 'clamp(26px, 5vw, 32px)', fontWeight: 700, cursor: 'pointer' }}>{projectTitle}</h1>
           )}
+          <p style={{ margin: '8px 0 0', color: saveStatus === 'error' ? '#a1260d' : '#9a8f80', fontSize: 12 }}>
+            {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? 'Saved' : saveStatus === 'error' ? 'Could not save' : '\u00a0'}
+          </p>
         </header>
 
-        <section style={{ background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+        <section
+          onDragEnter={handleFileDragEnter}
+          onDragOver={handleFileDragOver}
+          onDragLeave={handleFileDragLeave}
+          onDrop={handleFileDrop}
+          style={{
+            background: isFileDropActive ? '#f3e8d8' : '#fffaf2',
+            border: `1px solid ${isFileDropActive ? '#594f43' : '#d8cdbc'}`,
+            borderRadius: 12,
+            padding: 16,
+            marginBottom: 16,
+          }}
+        >
           <h2 style={{ margin: '0 0 12px', fontSize: 18, fontWeight: 700 }}>Project Files</h2>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
-            <div onClick={openFilePicker} role="button" tabIndex={0} style={{ padding: '10px 20px', border: '2px dashed #d8cdbc', borderRadius: 10, background: '#f8f1e5', cursor: 'pointer' }} onKeyDown={(e)=>{ if (e.key==='Enter') openFilePicker(); }}>
+            <div
+              onClick={openFilePicker}
+              role="button"
+              tabIndex={0}
+              style={{
+                padding: '10px 20px',
+                border: '2px dashed #d8cdbc',
+                borderRadius: 10,
+                background: '#f8f1e5',
+                cursor: 'pointer',
+              }}
+              onKeyDown={(e)=>{ if (e.key==='Enter') openFilePicker(); }}
+            >
               <input ref={fileInputRef} type="file" multiple hidden onChange={(e)=>handleFiles(e.target.files)} />
               <div style={{ fontSize: 18, fontWeight: 700 }}>Upload or drag files</div>
             </div>
 
             <div style={{ width: '100%', marginTop: 12 }}>
-              {projectFiles.length === 0 ? (
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+                {fileFilters.map((filter) => {
+                  const isActive = selectedFileFilter === filter;
+                  return (
+                    <button
+                      key={filter}
+                      onClick={() => setSelectedFileFilter(filter)}
+                      style={{
+                        border: '1px solid #d8cdbc',
+                        background: isActive ? '#594f43' : '#fffaf2',
+                        color: isActive ? '#fff' : '#2f2a24',
+                        padding: '6px 10px',
+                        borderRadius: 8,
+                        cursor: 'pointer',
+                        fontSize: 13,
+                        fontWeight: 700,
+                      }}
+                    >
+                      {filter} ({fileFilterCounts[filter]})
+                    </button>
+                  );
+                })}
+              </div>
+
+              {filesError ? (
+                <p style={{ margin: 0, color: '#a1260d' }}>{filesError}</p>
+              ) : isFilesLoading ? (
+                <p style={{ margin: 0, color: '#766b5d' }}>Loading files...</p>
+              ) : visibleProjectFiles.length === 0 ? (
                 <p style={{ margin: 0, color: '#766b5d' }}>No files uploaded</p>
               ) : (
                 <div style={{ display: 'grid', gap: 8 }}>
-                  {projectFiles.map((f) => (
-                    <div key={f.id} style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#fff', padding: 8, borderRadius: 8, border: '1px solid #e6dac8' }}>
-                      <div style={{ width: 36, height: 36, borderRadius: 8, background: '#f8f1e5', display: 'grid', placeItems: 'center' }}>{f.type.startsWith('image/') ? '🖼️' : '📄'}</div>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-                          <div style={{ fontWeight: 700 }}>{f.filename}</div>
-                          <div style={{ color: '#766b5d', fontSize: 13 }}>{f.size ? `${(f.size/1000).toFixed(1)} KB` : f.type}</div>
+                  {sharingFileId && (
+                    <p style={{ margin: '0 0 2px', color: '#766b5d', fontSize: 12 }}>Preparing file for sharing...</p>
+                  )}
+                  {fileActionError && (
+                    <p style={{ margin: '0 0 2px', color: '#a1260d', fontSize: 12 }}>{fileActionError}</p>
+                  )}
+                  {visibleProjectFiles.map((f) => (
+                    <div
+                      key={f.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        setFileActionError(null);
+                        openProjectFile(f, 'preview');
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          setFileActionError(null);
+                          openProjectFile(f, 'preview');
+                        }
+                      }}
+                      onMouseEnter={() => setHoveredFileRowId(f.id)}
+                      onMouseLeave={() => {
+                        setHoveredFileRowId((current) => (current === f.id ? null : current));
+                        setPressedFileRowId((current) => (current === f.id ? null : current));
+                      }}
+                      onMouseDown={() => setPressedFileRowId(f.id)}
+                      onMouseUp={() => setPressedFileRowId((current) => (current === f.id ? null : current))}
+                      onFocus={() => setFocusedFileRowId(f.id)}
+                      onBlur={() => {
+                        setFocusedFileRowId((current) => (current === f.id ? null : current));
+                        setPressedFileRowId((current) => (current === f.id ? null : current));
+                      }}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 12,
+                        background: pressedFileRowId === f.id ? '#f1e6d7' : hoveredFileRowId === f.id ? '#fbf5ec' : '#fff',
+                        padding: 10,
+                        borderRadius: 10,
+                        border: `1px solid ${focusedFileRowId === f.id ? '#594f43' : '#e6dac8'}`,
+                        boxShadow: focusedFileRowId === f.id ? '0 0 0 2px rgba(89,79,67,0.15)' : 'none',
+                        cursor: 'pointer',
+                        transition: 'background 120ms ease, border-color 120ms ease, box-shadow 120ms ease',
+                        position: 'relative',
+                      }}
+                    >
+                      <div style={{ width: 40, height: 40, minWidth: 40, borderRadius: 10, background: '#f8f1e5', display: 'grid', placeItems: 'center', fontSize: 18 }}>{f.type.startsWith('image/') ? '🖼️' : f.type === 'application/pdf' ? '📕' : '📄'}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                          <div style={{ fontWeight: 700, color: '#2f2a24', wordBreak: 'break-word' }}>{f.filename}</div>
+                          <span style={{ border: '1px solid #d8cdbc', background: '#fffaf2', color: '#766b5d', borderRadius: 999, padding: '3px 8px', fontSize: 12, fontWeight: 700 }}>{f.folder}</span>
                         </div>
-                        <div style={{ color: '#9a8f80', fontSize: 12 }}>{new Date(f.uploadedAt).toLocaleString()}</div>
+                        <div style={{ color: '#9a8f80', fontSize: 12, marginTop: 4, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                          <span>{f.size ? `${(f.size/1000).toFixed(1)} KB` : f.type}</span>
+                          <span>•</span>
+                          <span>{new Date(f.uploadedAt).toLocaleString()}</span>
+                        </div>
                       </div>
-                      <button onClick={() => deleteFile(f.id)} style={{ border: '1px solid #d8cdbc', background: '#fffaf2', padding: '6px 10px', borderRadius: 8, cursor: 'pointer' }}>Delete</button>
+                      <div style={{ position: 'relative' }}>
+                        <button
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            setOpenFileMenuId((current) => (current === f.id ? null : f.id));
+                          }}
+                          onKeyDown={(event) => {
+                            event.stopPropagation();
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              setOpenFileMenuId((current) => (current === f.id ? null : f.id));
+                            }
+                          }}
+                          aria-label={`File options for ${f.filename}`}
+                          style={{
+                            width: 44,
+                            height: 44,
+                            minWidth: 44,
+                            borderRadius: 10,
+                            border: '1px solid #d8cdbc',
+                            background: '#fffaf2',
+                            color: '#594f43',
+                            fontSize: 20,
+                            lineHeight: 1,
+                            cursor: 'pointer',
+                            display: 'grid',
+                            placeItems: 'center',
+                            padding: 0,
+                          }}
+                        >
+                          ⋯
+                        </button>
+
+                        {openFileMenuId === f.id && (
+                          <div
+                            ref={fileMenuRef}
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                            }}
+                            style={{
+                              position: 'absolute',
+                              right: 0,
+                              top: 46,
+                              zIndex: 20,
+                              minWidth: 180,
+                              background: '#fffaf2',
+                              border: '1px solid #d8cdbc',
+                              borderRadius: 10,
+                              boxShadow: '0 10px 20px rgba(47,42,36,0.12)',
+                              padding: 6,
+                              display: 'grid',
+                              gap: 4,
+                            }}
+                          >
+                            <button
+                              onClick={() => { void shareProjectFile(f); setOpenFileMenuId(null); }}
+                              disabled={sharingFileId === f.id}
+                              style={{ textAlign: 'left', border: 'none', background: 'transparent', color: '#2f2a24', padding: '8px 10px', borderRadius: 8, cursor: sharingFileId === f.id ? 'wait' : 'pointer', fontWeight: 700 }}
+                            >
+                              {sharingFileId === f.id ? 'Preparing share...' : 'Share / Open with...'}
+                            </button>
+                            <button onClick={() => { openProjectFile(f, 'browser'); setOpenFileMenuId(null); }} style={{ textAlign: 'left', border: 'none', background: 'transparent', color: '#2f2a24', padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>Open in browser</button>
+                            <button onClick={() => { openProjectFile(f, 'download'); setOpenFileMenuId(null); }} style={{ textAlign: 'left', border: 'none', background: 'transparent', color: '#2f2a24', padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>Download to Files</button>
+                            <button disabled style={{ textAlign: 'left', border: 'none', background: 'transparent', color: '#9a8f80', padding: '8px 10px', borderRadius: 8, cursor: 'not-allowed' }}>Rename (Coming later)</button>
+                            <button disabled style={{ textAlign: 'left', border: 'none', background: 'transparent', color: '#9a8f80', padding: '8px 10px', borderRadius: 8, cursor: 'not-allowed' }}>Move to folder (Coming later)</button>
+                            <button onClick={() => { void confirmAndDeleteFile(f); }} style={{ textAlign: 'left', border: 'none', background: 'transparent', color: '#a1260d', padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>Delete</button>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -413,15 +1545,100 @@ export default function ProjectPageClient({ projectName }: { projectName: string
           </div>
         </section>
 
-        <section style={{ marginBottom: 16 }}>
-          <h2 style={{ margin: '0 0 8px', fontSize: 18, fontWeight: 700 }}>Notes</h2>
-          <textarea value={notes} onChange={(e)=>handleNotesChange(e.target.value)} placeholder="Add project notes, client instructions, site details or observations..." style={{ width: '100%', minHeight: 120, padding: 12, borderRadius: 8, border: '1px solid #d8cdbc' }} />
+        <section style={{ marginBottom: 16, background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 12, padding: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Project Notes</h2>
+            <div style={{ color: saveStatus === 'error' ? '#a1260d' : '#9a8f80', fontSize: 12 }}>
+              {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? 'Saved' : saveStatus === 'error' ? 'Could not save' : '\u00a0'}
+            </div>
+          </div>
+
+          <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
+            <textarea
+              value={newNoteText}
+              onChange={(event) => setNewNoteText(event.target.value)}
+              placeholder="Add a project note, client request, site observation, or decision..."
+              style={{ width: '100%', minHeight: 88, padding: 12, borderRadius: 8, border: '1px solid #d8cdbc', boxSizing: 'border-box' }}
+            />
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <select
+                value={newNoteCategory}
+                onChange={(event) => setNewNoteCategory(event.target.value as NoteCategory)}
+                style={{ border: '1px solid #d8cdbc', background: '#fff', padding: '10px 12px', borderRadius: 8, minHeight: 44 }}
+              >
+                {NOTE_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}
+              </select>
+              <button
+                onClick={addNote}
+                style={{ border: 'none', background: '#594f43', color: '#fff', padding: '10px 14px', borderRadius: 8, minHeight: 44, cursor: 'pointer' }}
+              >
+                Add Note
+              </button>
+            </div>
+          </div>
+
+          <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
+            {projectNotes.length === 0 ? (
+              <div style={{ border: '1px dashed #d8cdbc', borderRadius: 8, padding: 12, color: '#766b5d' }}>
+                No notes yet. Add a note to capture project decisions and updates.
+              </div>
+            ) : (
+              projectNotes.map((note) => (
+                <div key={note.id} style={{ background: '#fff', border: '1px solid #e6dac8', borderRadius: 10, padding: 10 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'flex-start' }}>
+                    <span style={{ border: '1px solid #d8cdbc', background: '#fffaf2', color: '#766b5d', borderRadius: 999, padding: '3px 8px', fontSize: 12, fontWeight: 700 }}>{note.category}</span>
+                    <div style={{ position: 'relative' }}>
+                      <button
+                        onClick={() => setOpenNoteMenuId((current) => current === note.id ? null : note.id)}
+                        style={{ width: 44, height: 44, borderRadius: 10, border: '1px solid #d8cdbc', background: '#fffaf2', color: '#594f43', cursor: 'pointer' }}
+                        aria-label={`Note options for ${note.category}`}
+                      >
+                        ⋯
+                      </button>
+                      {openNoteMenuId === note.id && (
+                        <div style={{ position: 'absolute', right: 0, top: 46, zIndex: 15, minWidth: 150, background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 10, boxShadow: '0 10px 20px rgba(47,42,36,0.12)', padding: 6, display: 'grid', gap: 4 }}>
+                          <button onClick={() => { beginNoteEdit(note); setOpenNoteMenuId(null); }} style={{ textAlign: 'left', border: 'none', background: 'transparent', padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>Edit</button>
+                          <button onClick={() => deleteNote(note.id)} style={{ textAlign: 'left', border: 'none', background: 'transparent', color: '#a1260d', padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>Delete</button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {editingNoteId === note.id ? (
+                    <textarea
+                      value={note.text}
+                      onChange={(event) => updateNoteText(note.id, event.target.value)}
+                      onBlur={() => finishNoteEdit(note)}
+                      style={{ width: '100%', marginTop: 8, minHeight: 90, padding: 10, borderRadius: 8, border: '1px solid #d8cdbc', boxSizing: 'border-box' }}
+                    />
+                  ) : (
+                    <div onClick={() => beginNoteEdit(note)} style={{ marginTop: 8, whiteSpace: 'pre-wrap', cursor: 'text' }}>{note.text}</div>
+                  )}
+
+                  <div style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', color: '#9a8f80', fontSize: 12 }}>
+                    <div>Created: {new Date(note.createdAt).toLocaleString()}</div>
+                    <div>Edited: {new Date(note.updatedAt).toLocaleString()}</div>
+                  </div>
+
+                  <div style={{ marginTop: 8 }}>
+                    <select
+                      value={note.category}
+                      onChange={(event) => updateNoteCategory(note.id, event.target.value as NoteCategory)}
+                      style={{ border: '1px solid #d8cdbc', background: '#fff', padding: '8px 10px', borderRadius: 8, minHeight: 40 }}
+                    >
+                      {NOTE_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}
+                    </select>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
         </section>
 
         <section style={{ marginBottom: 16 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Assemblies</h2>
-            <button onClick={() => setShowAssemblyPicker((value) => !value)} style={{ border: '1px solid #d8cdbc', background: '#fffaf2', padding: '10px 14px', borderRadius: 8, cursor: 'pointer' }}>{showAssemblyPicker ? 'Hide picker' : 'Add Assembly'}</button>
+              <button onClick={() => setShowAssemblyPicker((value) => !value)} style={{ border: '1px solid #d8cdbc', background: '#fffaf2', padding: '10px 14px', borderRadius: 8, cursor: 'pointer', minHeight: 44 }}>{showAssemblyPicker ? 'Hide picker' : 'Add Assembly'}</button>
           </div>
 
           {showAssemblyPicker && (
@@ -443,7 +1660,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
                         <div style={{ fontWeight: 700 }}>{assembly.name}</div>
                         <div style={{ color: '#766b5d', fontSize: 13 }}>{assembly.category} • {assembly.subcategory}</div>
                       </div>
-                      <button onClick={() => addAssembly(assembly)} style={{ border: 'none', background: '#594f43', color: '#fff', padding: '8px 12px', borderRadius: 8, cursor: 'pointer' }}>Add</button>
+                        <button onClick={() => addAssembly(assembly)} style={{ border: 'none', background: '#594f43', color: '#fff', padding: '8px 12px', borderRadius: 8, cursor: 'pointer', minHeight: 44 }}>Add</button>
                     </div>
                   ))}
                 </div>
@@ -465,8 +1682,8 @@ export default function ProjectPageClient({ projectName }: { projectName: string
                         <div style={{ color: '#766b5d', fontSize: 13 }}>Source ID: {projectAssembly.sourceAssemblyId}</div>
                       </div>
                       <div style={{ display: 'flex', gap: 8 }}>
-                        <button onClick={() => toggleAssemblyExpanded(projectAssembly.id)} style={{ border: '1px solid #d8cdbc', background: '#fffaf2', padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>{isExpanded ? 'Collapse' : 'Expand'} </button>
-                        <button onClick={() => removeAssembly(projectAssembly.id)} style={{ border: '1px solid #d8cdbc', background: '#fffaf2', padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>Remove</button>
+                        <button onClick={() => toggleAssemblyExpanded(projectAssembly.id)} style={{ border: '1px solid #d8cdbc', background: '#fffaf2', padding: '8px 10px', borderRadius: 8, cursor: 'pointer', minHeight: 44 }}>{isExpanded ? 'Collapse' : 'Expand'} </button>
+                        <button onClick={() => removeAssembly(projectAssembly.id)} style={{ border: '1px solid #d8cdbc', background: '#fffaf2', padding: '8px 10px', borderRadius: 8, cursor: 'pointer', minHeight: 44 }}>Remove</button>
                       </div>
                     </div>
 
@@ -555,7 +1772,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
               {showPrototypeDetails && (
                 <div style={{ marginTop: 8, display: 'grid', gap: 8 }}>
                   <div><strong>Files:</strong> {understanding.detectedFiles.join(', ') || 'No files uploaded'}</div>
-                  <div><strong>Notes:</strong> {notes || 'No notes yet'}</div>
+                  <div><strong>Notes:</strong> {combinedNotesText || 'No notes yet'}</div>
                   <div><strong>Assemblies:</strong> {understanding.detectedAssemblies.join(', ') || 'No assemblies selected'}</div>
                 </div>
               )}
@@ -623,9 +1840,164 @@ export default function ProjectPageClient({ projectName }: { projectName: string
             </div>
 
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-              <button onClick={refreshUnderstanding} style={{ background: '#594f43', color: '#fff', border: 'none', padding: '10px 14px', borderRadius: 8 }}>Refresh Understanding</button>
-              <button onClick={() => { setUserUnderstanding({}); try { localStorage.removeItem(storageKey); } catch {}; clearAttribution(); }} style={{ border: '1px solid #d8cdbc', background: '#fffaf2', padding: '10px 14px', borderRadius: 8 }}>Accept/Edit Suggestions</button>
+              <button onClick={refreshUnderstanding} style={{ background: '#594f43', color: '#fff', border: 'none', padding: '10px 14px', borderRadius: 8, minHeight: 44 }}>Refresh Understanding</button>
+              <button onClick={() => {
+                persistUnderstanding({});
+                clearAttribution();
+                appendProjectActivity('project-understanding-updated', 'Understanding overrides cleared', 'User reset understanding overrides to AI baseline.');
+              }} style={{ border: '1px solid #d8cdbc', background: '#fffaf2', padding: '10px 14px', borderRadius: 8, minHeight: 44 }}>Accept/Edit Suggestions</button>
             </div>
+          </div>
+        </section>
+
+        <section style={{ marginBottom: 16, background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 12, padding: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Activity</h2>
+            <button
+              onClick={() => setShowManualUpdateForm((current) => !current)}
+              style={{ border: '1px solid #d8cdbc', background: '#fff', color: '#2f2a24', borderRadius: 8, minHeight: 44, padding: '10px 12px', cursor: 'pointer' }}
+            >
+              Add update
+            </button>
+          </div>
+
+          {showManualUpdateForm && (
+            <div style={{ marginTop: 10, background: '#fff', border: '1px solid #e6dac8', borderRadius: 8, padding: 10, display: 'grid', gap: 8 }}>
+              <select
+                value={manualUpdateType}
+                onChange={(event) => setManualUpdateType(event.target.value as "update" | "decision" | "client-request" | "site-condition")}
+                style={{ border: '1px solid #d8cdbc', borderRadius: 8, padding: '10px 12px', minHeight: 44 }}
+              >
+                <option value="update">Update</option>
+                <option value="decision">Decision</option>
+                <option value="client-request">Client request</option>
+                <option value="site-condition">Site condition</option>
+              </select>
+              <input
+                value={manualUpdateTitle}
+                onChange={(event) => setManualUpdateTitle(event.target.value)}
+                placeholder="Short title"
+                style={{ border: '1px solid #d8cdbc', borderRadius: 8, padding: '10px 12px', minHeight: 44 }}
+              />
+              <textarea
+                value={manualUpdateDescription}
+                onChange={(event) => setManualUpdateDescription(event.target.value)}
+                placeholder="Optional details"
+                style={{ border: '1px solid #d8cdbc', borderRadius: 8, padding: 10, minHeight: 88 }}
+              />
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button onClick={addManualActivity} style={{ border: 'none', background: '#594f43', color: '#fff', minHeight: 44, padding: '10px 12px', borderRadius: 8, cursor: 'pointer' }}>Save update</button>
+                <button
+                  onClick={() => {
+                    setShowManualUpdateForm(false);
+                    setManualUpdateTitle('');
+                    setManualUpdateDescription('');
+                  }}
+                  style={{ border: '1px solid #d8cdbc', background: '#fffaf2', minHeight: 44, padding: '10px 12px', borderRadius: 8, cursor: 'pointer' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {ACTIVITY_FILTERS.map((filter) => {
+              const isActive = activityFilter === filter;
+              return (
+                <button
+                  key={filter}
+                  onClick={() => setActivityFilter(filter)}
+                  style={{ border: '1px solid #d8cdbc', background: isActive ? '#594f43' : '#fff', color: isActive ? '#fff' : '#2f2a24', borderRadius: 999, minHeight: 40, padding: '8px 12px', cursor: 'pointer', fontSize: 13, fontWeight: 700 }}
+                >
+                  {filter}
+                </button>
+              );
+            })}
+          </div>
+
+          <div style={{ marginTop: 12, display: 'grid', gap: 12 }}>
+            {groupedActivity.length === 0 ? (
+              <div style={{ border: '1px dashed #d8cdbc', borderRadius: 8, padding: 12, color: '#766b5d' }}>
+                {activityFilter === 'All' ? 'No project activity yet.' : `No activity in ${activityFilter}.`}
+              </div>
+            ) : (
+              groupedActivity.map(([groupLabel, entries]) => (
+                <div key={groupLabel} style={{ display: 'grid', gap: 8 }}>
+                  <div style={{ color: '#766b5d', fontSize: 12, fontWeight: 700, textTransform: 'uppercase' }}>{groupLabel}</div>
+                  {entries.map((entry) => {
+                    const relatedFile = findProjectFile(entry.relatedFile, entry.relatedFolder);
+                    const isExpanded = expandedActivityIds[entry.id] === true;
+                    const isDecision = entry.type === 'decision';
+
+                    return (
+                      <div key={entry.id} style={{ background: '#fff', border: `1px solid ${isDecision ? '#d7c09a' : '#e6dac8'}`, borderRadius: 10, padding: 10 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                              <span style={{ color: '#594f43', fontWeight: 700, minWidth: 20 }}>{activityTypeIcon(entry.type)}</span>
+                              <div style={{ fontWeight: 700, wordBreak: 'break-word' }}>{entry.title}</div>
+                              <span style={{ border: '1px solid #d8cdbc', background: '#fffaf2', color: '#766b5d', borderRadius: 999, padding: '2px 8px', fontSize: 11, fontWeight: 700 }}>{activityTypeBadge(entry.type)}</span>
+                            </div>
+                            <div style={{ marginTop: 4, color: '#766b5d', fontSize: 12 }}>{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} • {entry.source.toUpperCase()}</div>
+                          </div>
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            {entry.description && (
+                              <button onClick={() => setExpandedActivityIds((current) => ({ ...current, [entry.id]: !current[entry.id] }))} style={{ minHeight: 36, border: '1px solid #d8cdbc', background: '#fffaf2', borderRadius: 8, padding: '6px 10px', cursor: 'pointer' }}>{isExpanded ? 'Hide' : 'More'}</button>
+                            )}
+                            <button onClick={() => setOpenActivityMenuId((current) => current === entry.id ? null : entry.id)} style={{ width: 44, height: 44, border: '1px solid #d8cdbc', background: '#fffaf2', borderRadius: 8, cursor: 'pointer' }}>⋯</button>
+                          </div>
+                        </div>
+
+                        {isExpanded && entry.description && (
+                          <div style={{ marginTop: 8, color: '#4b453d', whiteSpace: 'pre-wrap' }}>{entry.description}</div>
+                        )}
+
+                        {entry.relatedFile && entry.relatedFolder && (
+                          <div style={{ marginTop: 8, fontSize: 12 }}>
+                            {relatedFile ? (
+                              <button
+                                onClick={() => openActivityRelatedFile(entry)}
+                                style={{ border: '1px solid #d8cdbc', background: '#fff', color: '#2f2a24', borderRadius: 8, minHeight: 36, padding: '6px 10px', cursor: 'pointer' }}
+                              >
+                                Open {entry.relatedFile}
+                              </button>
+                            ) : (
+                              <span style={{ color: '#9a8f80' }}>Related file unavailable: {entry.relatedFile}</span>
+                            )}
+                          </div>
+                        )}
+
+                        {openActivityMenuId === entry.id && (
+                          <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                            {relatedFile && (
+                              <button onClick={() => openActivityRelatedFile(entry)} style={{ border: '1px solid #d8cdbc', background: '#fff', borderRadius: 8, minHeight: 36, padding: '6px 10px', cursor: 'pointer' }}>Open file</button>
+                            )}
+                            <button
+                              onClick={() => {
+                                if (!window.confirm('Delete this activity entry?')) {
+                                  return;
+                                }
+                                setActivity((current) => {
+                                  const next = current.filter((item) => item.id !== entry.id);
+                                  writeStorageValue(activityStorageKey, next);
+                                  void saveProjectPatch({ activity: next });
+                                  return next;
+                                });
+                                setOpenActivityMenuId(null);
+                              }}
+                              style={{ border: '1px solid #d8cdbc', background: '#fff', color: '#a1260d', borderRadius: 8, minHeight: 36, padding: '6px 10px', cursor: 'pointer' }}
+                            >
+                              Delete entry
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ))
+            )}
           </div>
         </section>
 
@@ -647,20 +2019,6 @@ export default function ProjectPageClient({ projectName }: { projectName: string
         </div>
       )}
 
-      {/* Activity panel bottom */}
-      <div style={{ position: 'fixed', left: 20, bottom: 20, width: 320 }}>
-        <div style={{ background: '#fff', border: '1px solid #e6dac8', borderRadius: 8, overflow: 'hidden' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 8, cursor: 'pointer' }} onClick={() => setActivityOpen((s)=>!s)}>
-            <div style={{ fontWeight: 700 }}>Activity</div>
-            <div style={{ color: '#766b5d' }}>{activityOpen ? '▴' : '▾'}</div>
-          </div>
-          {activityOpen && (
-            <div style={{ maxHeight: 220, overflow: 'auto', padding: 8 }}>
-              {activity.length === 0 ? <div style={{ color: '#766b5d' }}>No activity</div> : activity.slice().reverse().map((a, i) => <div key={i} style={{ padding: 8, borderBottom: '1px solid #f0e9df' }}>{a}</div>)}
-            </div>
-          )}
-        </div>
-      </div>
     </main>
   );
 }

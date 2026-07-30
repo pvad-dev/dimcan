@@ -11,7 +11,7 @@ type WorkspaceResponse = {
   message?: string;
 };
 
-type CreateProjectResponse = {
+type ProjectActionResponse = {
   success: boolean;
   projectName?: string;
   message?: string;
@@ -26,6 +26,8 @@ export default function Home() {
   const [projectNotes, setProjectNotes] = useState("");
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
   const [message, setMessage] = useState("");
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const [busyProject, setBusyProject] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   async function loadWorkspace() {
@@ -48,11 +50,18 @@ export default function Home() {
     }
   }
 
-  const suggestedProjectName = useMemo(() => buildSuggestedProjectName(
-    uploadedFiles.map((file) => ({ filename: file.name, type: file.type })),
-    projectNotes,
-    projectName,
-  ), [projectName, projectNotes, uploadedFiles]);
+  const suggestedProjectName = useMemo(
+    () =>
+      buildSuggestedProjectName(
+        uploadedFiles.map((file) => ({
+          filename: file.name,
+          type: file.type,
+        })),
+        projectNotes,
+        projectName,
+      ),
+    [projectName, projectNotes, uploadedFiles],
+  );
 
   const openFilePicker = () => fileInputRef.current?.click();
 
@@ -67,7 +76,8 @@ export default function Home() {
     setIsCreating(true);
     setMessage("");
 
-    const finalProjectName = (projectName || suggestedProjectName).trim() || "Untitled Project";
+    const finalProjectName =
+      (projectName || suggestedProjectName).trim() || "Untitled Project";
 
     try {
       const response = await fetch("/api/workspace", {
@@ -80,7 +90,7 @@ export default function Home() {
         }),
       });
 
-      const data: CreateProjectResponse = await response.json();
+      const data: ProjectActionResponse = await response.json();
 
       if (!response.ok) {
         setMessage(data.message ?? "The project could not be created.");
@@ -100,16 +110,135 @@ export default function Home() {
     }
   }
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void loadWorkspace();
-    }, 0);
+  async function renameProject(currentName: string) {
+    const requestedName = window.prompt("New project name:", currentName);
+    const newName = requestedName?.trim();
 
-    return () => window.clearTimeout(timer);
+    if (!newName || newName === currentName) {
+      setOpenMenu(null);
+      return;
+    }
+
+    setBusyProject(currentName);
+    setMessage("");
+
+    try {
+      const response = await fetch("/api/workspace", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "rename",
+          projectName: currentName,
+          newProjectName: newName,
+        }),
+      });
+
+      const data: ProjectActionResponse = await response.json();
+
+      if (!response.ok) {
+        setMessage(data.message ?? "The project could not be renamed.");
+        return;
+      }
+
+      await loadWorkspace();
+    } catch {
+      setMessage("The project could not be renamed.");
+    } finally {
+      setBusyProject(null);
+      setOpenMenu(null);
+    }
+  }
+
+  async function archiveProject(project: string) {
+    const confirmed = window.confirm(
+      `Archive "${project}"?\n\nIt will be moved out of the active Projects list.`,
+    );
+
+    if (!confirmed) {
+      setOpenMenu(null);
+      return;
+    }
+
+    setBusyProject(project);
+    setMessage("");
+
+    try {
+      const response = await fetch("/api/workspace", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "archive",
+          projectName: project,
+        }),
+      });
+
+      const data: ProjectActionResponse = await response.json();
+
+      if (!response.ok) {
+        setMessage(data.message ?? "The project could not be archived.");
+        return;
+      }
+
+      await loadWorkspace();
+    } catch {
+      setMessage("The project could not be archived.");
+    } finally {
+      setBusyProject(null);
+      setOpenMenu(null);
+    }
+  }
+
+  async function deleteProject(project: string) {
+    const confirmed = window.confirm(
+      `Permanently delete "${project}"?\n\nThis deletes the project folder and everything inside it. This cannot be undone.`,
+    );
+
+    if (!confirmed) {
+      setOpenMenu(null);
+      return;
+    }
+
+    setBusyProject(project);
+    setMessage("");
+
+    try {
+      const response = await fetch("/api/workspace", {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          projectName: project,
+        }),
+      });
+
+      const data: ProjectActionResponse = await response.json();
+
+      if (!response.ok) {
+        setMessage(data.message ?? "The project could not be deleted.");
+        return;
+      }
+
+      await loadWorkspace();
+    } catch {
+      setMessage("The project could not be deleted.");
+    } finally {
+      setBusyProject(null);
+      setOpenMenu(null);
+    }
+  }
+
+  useEffect(() => {
+    void loadWorkspace();
   }, []);
 
   return (
     <main
+      onClick={() => setOpenMenu(null)}
       style={{
         minHeight: "100vh",
         background: "#f4efe5",
@@ -156,29 +285,49 @@ export default function Home() {
             </h1>
           </div>
 
-          <button
-            type="button"
-            onClick={() => {
-              setShowNewProject(true);
-              setMessage("");
-            }}
-            style={{
-              border: "none",
-              borderRadius: "9px",
-              padding: "12px 18px",
-              background: "#594f43",
-              color: "#ffffff",
-              cursor: "pointer",
-              fontSize: "15px",
-              fontWeight: 600,
-            }}
-          >
-            New Project
-          </button>
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+            <Link
+              href="/archive"
+              style={{
+                border: "1px solid #b8aa98",
+                borderRadius: "9px",
+                padding: "12px 18px",
+                background: "#fffaf2",
+                color: "#2f2a24",
+                textDecoration: "none",
+                fontSize: "15px",
+                fontWeight: 600,
+              }}
+            >
+              Archived Projects
+            </Link>
+
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                setShowNewProject(true);
+                setMessage("");
+              }}
+              style={{
+                border: "none",
+                borderRadius: "9px",
+                padding: "12px 18px",
+                background: "#594f43",
+                color: "#ffffff",
+                cursor: "pointer",
+                fontSize: "15px",
+                fontWeight: 600,
+              }}
+            >
+              New Project
+            </button>
+          </div>
         </header>
 
         {showNewProject && (
           <section
+            onClick={(event) => event.stopPropagation()}
             style={{
               background: "#fffaf2",
               border: "1px solid #d8cdbc",
@@ -193,7 +342,9 @@ export default function Home() {
                 role="button"
                 tabIndex={0}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") openFilePicker();
+                  if (event.key === "Enter" || event.key === " ") {
+                    openFilePicker();
+                  }
                 }}
                 style={{
                   border: "2px dashed #d8cdbc",
@@ -205,14 +356,31 @@ export default function Home() {
                   textAlign: "center",
                 }}
               >
-                <input ref={fileInputRef} type="file" multiple hidden onChange={(event) => handleFiles(event.target.files)} />
-                <div style={{ fontSize: "18px", fontWeight: 700, marginBottom: "6px" }}>Upload files to start a project</div>
-                <div style={{ color: "#766b5d" }}>Drag and drop files here or choose files from your device.</div>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  hidden
+                  onChange={(event) => handleFiles(event.target.files)}
+                />
+                <div
+                  style={{
+                    fontSize: "18px",
+                    fontWeight: 700,
+                    marginBottom: "6px",
+                  }}
+                >
+                  Upload files to start a project
+                </div>
+                <div style={{ color: "#766b5d" }}>
+                  Drag and drop files here or choose files from your device.
+                </div>
               </div>
 
               {uploadedFiles.length > 0 && (
                 <div style={{ marginBottom: "12px", color: "#766b5d" }}>
-                  <strong>Selected files:</strong> {uploadedFiles.map((file) => file.name).join(", ")}
+                  <strong>Selected files:</strong>{" "}
+                  {uploadedFiles.map((file) => file.name).join(", ")}
                 </div>
               )}
 
@@ -271,9 +439,27 @@ export default function Home() {
                 }}
               />
 
-              <div style={{ marginBottom: "12px", padding: "10px 12px", background: "#f5eddf", borderRadius: "8px", border: "1px solid #e7dbca" }}>
-                <div style={{ fontSize: "14px", color: "#766b5d", marginBottom: "4px" }}>AI prototype suggestion</div>
-                <div style={{ fontWeight: 700 }}>Suggested project name: {suggestedProjectName}</div>
+              <div
+                style={{
+                  marginBottom: "12px",
+                  padding: "10px 12px",
+                  background: "#f5eddf",
+                  borderRadius: "8px",
+                  border: "1px solid #e7dbca",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "14px",
+                    color: "#766b5d",
+                    marginBottom: "4px",
+                  }}
+                >
+                  AI prototype suggestion
+                </div>
+                <div style={{ fontWeight: 700 }}>
+                  Suggested project name: {suggestedProjectName}
+                </div>
               </div>
 
               {message && (
@@ -332,6 +518,20 @@ export default function Home() {
               </div>
             </form>
           </section>
+        )}
+
+        {message && !showNewProject && (
+          <p
+            style={{
+              background: "#fffaf2",
+              border: "1px solid #c9988d",
+              borderRadius: "9px",
+              padding: "12px",
+              color: "#9a3f32",
+            }}
+          >
+            {message}
+          </p>
         )}
 
         {isLoading && <p>Opening Dimcan Workspace...</p>}
@@ -409,43 +609,130 @@ export default function Home() {
                     gap: "14px",
                   }}
                 >
-                  {workspace.projects.map((project) => (
-                    <Link
-                      key={project}
-                      href={`/projects/${encodeURIComponent(project)}`}
-                      style={{
-                        display: "block",
-                        background: "#fffaf2",
-                        border: "1px solid #d8cdbc",
-                        borderRadius: "12px",
-                        padding: "20px",
-                        color: "#2f2a24",
-                        textDecoration: "none",
-                        cursor: "pointer",
-                      }}
-                    >
-                      <div
+                  {workspace.projects.map((project) => {
+                    const isBusy = busyProject === project;
+
+                    return (
+                      <article
+                        key={project}
                         style={{
-                          fontSize: "30px",
-                          marginBottom: "12px",
+                          position: "relative",
+                          background: "#fffaf2",
+                          border: "1px solid #d8cdbc",
+                          borderRadius: "12px",
+                          opacity: isBusy ? 0.65 : 1,
                         }}
                       >
-                        📁
-                      </div>
+                        <Link
+                          href={`/projects/${encodeURIComponent(project)}`}
+                          style={{
+                            display: "block",
+                            minHeight: "130px",
+                            padding: "20px",
+                            color: "#2f2a24",
+                            textDecoration: "none",
+                            cursor: isBusy ? "default" : "pointer",
+                            pointerEvents: isBusy ? "none" : "auto",
+                          }}
+                        >
+                          <div
+                            style={{
+                              fontSize: "30px",
+                              marginBottom: "12px",
+                            }}
+                          >
+                            📁
+                          </div>
 
-                      <strong>{project}</strong>
+                          <strong>{project}</strong>
 
-                      <p
-                        style={{
-                          margin: "8px 0 0",
-                          color: "#766b5d",
-                          fontSize: "14px",
-                        }}
-                      >
-                        Open project
-                      </p>
-                    </Link>
-                  ))}
+                          <p
+                            style={{
+                              margin: "8px 0 0",
+                              color: "#766b5d",
+                              fontSize: "14px",
+                            }}
+                          >
+                            {isBusy ? "Working..." : "Open project"}
+                          </p>
+                        </Link>
+
+                        <button
+                          type="button"
+                          aria-label={`Project options for ${project}`}
+                          disabled={isBusy}
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            setOpenMenu((current) =>
+                              current === project ? null : project,
+                            );
+                          }}
+                          style={{
+                            position: "absolute",
+                            top: "10px",
+                            right: "10px",
+                            width: "34px",
+                            height: "34px",
+                            border: "1px solid #d8cdbc",
+                            borderRadius: "8px",
+                            background: "#fffaf2",
+                            color: "#594f43",
+                            cursor: isBusy ? "default" : "pointer",
+                            fontSize: "22px",
+                            lineHeight: 1,
+                          }}
+                        >
+                          ⋯
+                        </button>
+
+                        {openMenu === project && (
+                          <div
+                            onClick={(event) => event.stopPropagation()}
+                            style={{
+                              position: "absolute",
+                              top: "50px",
+                              right: "10px",
+                              zIndex: 10,
+                              width: "150px",
+                              overflow: "hidden",
+                              background: "#ffffff",
+                              border: "1px solid #d8cdbc",
+                              borderRadius: "9px",
+                              boxShadow: "0 8px 24px rgba(47, 42, 36, 0.15)",
+                            }}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => void renameProject(project)}
+                              style={menuButtonStyle}
+                            >
+                              Rename
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => void archiveProject(project)}
+                              style={menuButtonStyle}
+                            >
+                              Archive
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => void deleteProject(project)}
+                              style={{
+                                ...menuButtonStyle,
+                                color: "#9a3f32",
+                              }}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        )}
+                      </article>
+                    );
+                  })}
                 </div>
               ) : (
                 <div
@@ -475,3 +762,16 @@ export default function Home() {
     </main>
   );
 }
+
+const menuButtonStyle = {
+  display: "block",
+  width: "100%",
+  border: "none",
+  borderBottom: "1px solid #eee4d7",
+  padding: "11px 13px",
+  background: "#ffffff",
+  color: "#2f2a24",
+  cursor: "pointer",
+  textAlign: "left" as const,
+  fontSize: "14px",
+};

@@ -432,3 +432,121 @@ export async function DELETE(request: NextRequest) {
     return errorResponse(status, message);
   }
 }
+
+export async function PATCH(request: NextRequest) {
+  try {
+    const projectName = getProjectNameFromRequest(request);
+    const projectPath = getProjectPath(projectName);
+    await ensureProjectFolders(projectPath);
+
+    const body = (await request.json()) as {
+      action?: string;
+      filename?: string;
+      folder?: string;
+      newFilename?: string;
+      targetFolder?: string;
+    };
+
+    const action = String(body.action || "");
+
+    if (action === "rename") {
+      const folder = validateFolderName(body.folder ?? "");
+      const filename = validateFilename(body.filename ?? "");
+      const requestedNewFilename = validateFilename(body.newFilename ?? "");
+
+      const originalExt = path.extname(filename);
+      const requestedExt = path.extname(requestedNewFilename);
+      const newFilename = requestedExt
+        ? requestedNewFilename
+        : `${path.parse(requestedNewFilename).name}${originalExt}`;
+
+      if (newFilename === filename) {
+        return errorResponse(400, "New filename must be different.");
+      }
+
+      const folderPath = getFolderPath(projectPath, folder);
+      const sourcePath = path.join(folderPath, filename);
+      const destinationPath = path.join(folderPath, newFilename);
+
+      if (!ensureWithin(folderPath, sourcePath) || !ensureWithin(folderPath, destinationPath)) {
+        return errorResponse(400, "Invalid file path.");
+      }
+
+      try {
+        await fs.access(destinationPath);
+        return errorResponse(409, "A file with that name already exists.");
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException)?.code;
+        if (code && code !== "ENOENT") {
+          throw error;
+        }
+      }
+
+      await fs.rename(sourcePath, destinationPath);
+      const file = await buildFileMeta(folderPath, folder, newFilename);
+
+      return NextResponse.json({
+        success: true,
+        file,
+      });
+    }
+
+    if (action === "move") {
+      const folder = validateFolderName(body.folder ?? "");
+      const targetFolder = validateFolderName(body.targetFolder ?? "");
+      const filename = validateFilename(body.filename ?? "");
+
+      if (folder === targetFolder) {
+        return errorResponse(400, "File is already in that folder.");
+      }
+
+      const sourceFolderPath = getFolderPath(projectPath, folder);
+      const targetFolderPath = getFolderPath(projectPath, targetFolder);
+      const sourcePath = path.join(sourceFolderPath, filename);
+      const destinationPath = path.join(targetFolderPath, filename);
+
+      if (!ensureWithin(sourceFolderPath, sourcePath) || !ensureWithin(targetFolderPath, destinationPath)) {
+        return errorResponse(400, "Invalid file path.");
+      }
+
+      try {
+        await fs.access(destinationPath);
+        return errorResponse(409, "A file with that name already exists in the destination folder.");
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException)?.code;
+        if (code && code !== "ENOENT") {
+          throw error;
+        }
+      }
+
+      await fs.rename(sourcePath, destinationPath);
+      const file = await buildFileMeta(targetFolderPath, targetFolder, filename);
+
+      return NextResponse.json({
+        success: true,
+        file,
+      });
+    }
+
+    return errorResponse(400, "Unknown file action.");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return errorResponse(404, "File not found.");
+    }
+
+    const message = error instanceof Error ? error.message : "Failed to update file.";
+    const status =
+      message === "Invalid project name." ||
+      message === "Invalid project path." ||
+      message === "Invalid folder name." ||
+      message === "Invalid filename." ||
+      message === "Invalid file path." ||
+      message === "New filename must be different." ||
+      message === "File is already in that folder." ||
+      message === "Unknown file action."
+        ? 400
+        : 500;
+
+    return errorResponse(status, message);
+  }
+}

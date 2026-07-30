@@ -9,7 +9,7 @@ Status is based on repository code inspection at the time of writing.
    - Lists active projects.
 2. Project lifecycle actions:
    - Create project
-   - Rename project
+   - Rename project (folder + display title)
    - Archive project
    - Restore archived project
    - Delete project
@@ -33,6 +33,8 @@ Status is based on repository code inspection at the time of writing.
    - Whole-row file open interaction
    - Ellipsis file menu
    - Share/Open With flow with clipboard fallback
+   - File rename action with validation and extension-preserving behavior
+   - File move-to-folder action with destination validation
    - Automatic activity entries for file open/download/share/link-copy actions
 9. Notes and activity workflows:
    - Multi-note system with categories
@@ -40,27 +42,31 @@ Status is based on repository code inspection at the time of writing.
    - Manual activity entry creation
    - Activity item deletion with confirmation
    - Automatic activity entry when understanding overrides are reset to AI baseline
+   - Automatic structured entries for file rename and file move
 10. Assemblies workflow:
    - Add/remove assemblies
    - Edit component statuses and fields
 11. Save state indicators:
    - Saving, Saved, Could not save
 12. Archive and restore activity logging from workspace API.
+13. Project rename hardening:
+   - Workspace rename validates trimmed names and rejects invalid Windows characters, reserved names, trailing spaces/periods, empty names, and duplicate folders.
+   - Path-boundary checks are enforced when constructing project folder paths.
+   - Exact same-name rename returns success without calling filesystem rename.
+   - Case-only renames on Windows use a temporary intermediate folder rename to avoid EPERM.
+   - project.json is updated after rename to set displayTitle and align assembly projectId references with the new folder name.
+   - Project page title rename now performs workspace rename and navigates to /projects/<newName> on success.
 
 ## Partially Completed Features
 
-1. File rename and file move:
-   - Activity types are defined.
-   - UI menu entries exist but are disabled (Coming later).
-   - No API endpoint for rename/move yet.
-2. Responsive behavior:
+1. Responsive behavior:
    - Many controls use flexible wrapping and touch-sized buttons.
    - Project page spacing and title typography use responsive scaling.
    - No comprehensive breakpoint-based layout system is implemented.
-3. Design system consistency:
+2. Design system consistency:
    - Some global CSS tokens exist.
    - Most pages still rely on inline styles and repeated style blocks.
-4. AI understanding subsystem:
+3. AI understanding subsystem:
    - Deterministic prototype is implemented.
    - Not integrated with external AI services in this codebase.
 
@@ -93,16 +99,15 @@ Status is based on repository code inspection at the time of writing.
 
 ## Recommended Next Features (Logical Order)
 
-1. Implement file rename and move API + UI + activity wiring.
-2. Introduce auth and project-level access control for API routes.
-3. Move hard-coded workspace path to environment/config with safe defaults.
-4. Add automated tests:
+1. Introduce auth and project-level access control for API routes.
+2. Move hard-coded workspace path to environment/config with safe defaults.
+3. Add automated tests:
    - API route tests for validation and persistence
    - UI interaction smoke tests for files/notes/activity
-5. Consolidate repeated inline styles into reusable components/tokens without changing behavior.
-6. Add pagination/virtualization strategy for large activity and file lists.
-7. Define integration contract layer for future supplier/estimating/execution/warranty modules.
-8. Add automated UI tests for activity event coverage (open/share/download/reset actions).
+4. Consolidate repeated inline styles into reusable components/tokens without changing behavior.
+5. Add pagination/virtualization strategy for large activity and file lists.
+6. Define integration contract layer for future supplier/estimating/execution/warranty modules.
+7. Add automated UI tests for activity event coverage (open/share/download/rename/move/reset actions).
 
 ## Confidence and Uncertainty
 

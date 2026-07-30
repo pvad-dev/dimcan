@@ -7,6 +7,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const WORKSPACE_PATH = String.raw`K:\RenovationPlatform\Dimcan Workspace`;
+const PROJECTS_ROOT = path.join(WORKSPACE_PATH, "Projects");
 
 const STANDARD_FOLDERS = [
   "Projects",
@@ -69,14 +70,51 @@ async function initializeWorkspace() {
 }
 
 function cleanProjectName(projectName: string) {
-  return projectName
-    .trim()
-    .replace(/[<>:"/\\|?*]/g, "")
-    .replace(/\.+$/g, "");
+  return projectName.trim();
+}
+
+function isWindowsReservedName(projectName: string) {
+  return /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(projectName);
+}
+
+function validateProjectName(projectNameRaw: string, options?: { fieldName?: string }) {
+  const fieldName = options?.fieldName ?? "project name";
+  const projectName = cleanProjectName(projectNameRaw);
+
+  if (!projectName) {
+    throw new Error(`Enter a ${fieldName}.`);
+  }
+
+  if (projectName === "." || projectName === "..") {
+    throw new Error("Invalid project name.");
+  }
+
+  if (/[<>:"/\\|?*\x00-\x1f]/.test(projectName)) {
+    throw new Error("Project name contains invalid characters.");
+  }
+
+  if (/[. ]$/.test(projectName)) {
+    throw new Error("Project name cannot end with a space or period.");
+  }
+
+  if (isWindowsReservedName(projectName)) {
+    throw new Error("Project name is reserved by Windows.");
+  }
+
+  return projectName;
+}
+
+function ensureWithin(parentPath: string, childPath: string) {
+  const relative = path.relative(parentPath, childPath);
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 function projectPath(projectName: string) {
-  return path.join(WORKSPACE_PATH, "Projects", projectName);
+  const target = path.join(PROJECTS_ROOT, projectName);
+  if (!ensureWithin(PROJECTS_ROOT, target)) {
+    throw new Error("Invalid project path.");
+  }
+  return target;
 }
 
 async function pathExists(targetPath: string) {
@@ -151,6 +189,79 @@ async function appendProjectHistory(
   await fs.rename(tempFilePath, projectFilePath);
 }
 
+async function updateProjectDataForRename(projectDir: string, oldName: string, newName: string) {
+  const projectFilePath = path.join(projectDir, "project.json");
+  const now = new Date().toISOString();
+
+  const fallback = {
+    schemaVersion: 2,
+    displayTitle: newName,
+    notes: [],
+    activity: [],
+    assemblies: [],
+    understandingOverrides: {},
+    attributionData: {},
+    updatedAt: now,
+  } as Record<string, unknown>;
+
+  let projectData = fallback;
+
+  try {
+    const raw = await fs.readFile(projectFilePath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      projectData = { ...fallback, ...(parsed as Record<string, unknown>) };
+    }
+  } catch {
+    // Use fallback when file is missing or invalid.
+  }
+
+  const assemblies = Array.isArray(projectData.assemblies) ? projectData.assemblies : [];
+  const nextAssemblies = assemblies.map((assembly) => {
+    if (!assembly || typeof assembly !== "object") {
+      return assembly;
+    }
+    const record = assembly as Record<string, unknown>;
+    if (record.projectId === oldName) {
+      return {
+        ...record,
+        projectId: newName,
+      };
+    }
+    return record;
+  });
+
+  const nextData = {
+    ...projectData,
+    schemaVersion: 2,
+    displayTitle: newName,
+    assemblies: nextAssemblies,
+    updatedAt: now,
+  };
+
+  const tempFilePath = `${projectFilePath}.tmp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await fs.mkdir(projectDir, { recursive: true });
+  await fs.writeFile(tempFilePath, JSON.stringify(nextData, null, 2), "utf8");
+  await fs.rename(tempFilePath, projectFilePath);
+}
+
+function projectUpdateErrorMessage(error: unknown) {
+  if (!(error instanceof Error)) {
+    return "The project could not be updated.";
+  }
+
+  const nodeError = error as NodeJS.ErrnoException;
+  if (nodeError.code === "EPERM" || nodeError.code === "EACCES") {
+    return "The project folder could not be renamed because it is in use or permission was denied.";
+  }
+
+  if (nodeError.code === "ENOENT") {
+    return "The project folder could not be found.";
+  }
+
+  return nodeError.message || "The project could not be updated.";
+}
+
 export async function GET(request: NextRequest) {
   try {
     const workspace = await initializeWorkspace();
@@ -206,13 +317,15 @@ export async function POST(request: NextRequest) {
     await initializeWorkspace();
 
     const body = await request.json();
-    const projectName = cleanProjectName(body.projectName ?? "");
+    let projectName = "";
 
-    if (!projectName) {
+    try {
+      projectName = validateProjectName(String(body.projectName ?? ""));
+    } catch (error) {
       return NextResponse.json(
         {
           success: false,
-          message: "Enter a project name.",
+          message: error instanceof Error ? error.message : "Invalid project name.",
         },
         { status: 400 },
       );
@@ -266,13 +379,15 @@ export async function PATCH(request: NextRequest) {
 
     const body = await request.json();
     const action = String(body.action ?? "");
-    const currentName = cleanProjectName(body.projectName ?? "");
+    let currentName = "";
 
-    if (!currentName) {
+    try {
+      currentName = validateProjectName(String(body.projectName ?? ""));
+    } catch (error) {
       return NextResponse.json(
         {
           success: false,
-          message: "The project name is missing.",
+          message: error instanceof Error ? error.message : "Invalid project name.",
         },
         { status: 400 },
       );
@@ -337,21 +452,36 @@ export async function PATCH(request: NextRequest) {
     }
 
     if (action === "rename") {
-      const newName = cleanProjectName(body.newProjectName ?? "");
+      let newName = "";
 
-      if (!newName) {
+      try {
+        newName = validateProjectName(String(body.newProjectName ?? ""), {
+          fieldName: "new project name",
+        });
+      } catch (error) {
         return NextResponse.json(
           {
             success: false,
-            message: "Enter a new project name.",
+            message: error instanceof Error ? error.message : "Invalid project name.",
           },
           { status: 400 },
         );
       }
 
-      const renamedPath = projectPath(newName);
+      if (newName === currentName) {
+        return NextResponse.json({
+          success: true,
+          projectName: currentName,
+        });
+      }
 
-      if (await pathExists(renamedPath)) {
+      const renamedPath = projectPath(newName);
+      const isCaseOnlyRename =
+        process.platform === "win32" &&
+        newName.toLocaleLowerCase() === currentName.toLocaleLowerCase() &&
+        newName !== currentName;
+
+      if (!isCaseOnlyRename && (await pathExists(renamedPath))) {
         return NextResponse.json(
           {
             success: false,
@@ -361,7 +491,38 @@ export async function PATCH(request: NextRequest) {
         );
       }
 
-      await fs.rename(currentPath, renamedPath);
+      try {
+        if (isCaseOnlyRename) {
+          let tempPath = "";
+          for (let attempt = 0; attempt < 5; attempt += 1) {
+            const tempName = `${newName}__tmp__${Date.now()}_${Math.random().toString(16).slice(2)}`;
+            const candidate = projectPath(tempName);
+            if (!(await pathExists(candidate))) {
+              tempPath = candidate;
+              break;
+            }
+          }
+
+          if (!tempPath) {
+            throw new Error("Could not prepare a temporary folder name for case-only rename.");
+          }
+
+          await fs.rename(currentPath, tempPath);
+          await fs.rename(tempPath, renamedPath);
+        } else {
+          await fs.rename(currentPath, renamedPath);
+        }
+      } catch (error) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: projectUpdateErrorMessage(error),
+          },
+          { status: 500 },
+        );
+      }
+
+      await updateProjectDataForRename(renamedPath, currentName, newName);
       await appendProjectHistory(renamedPath, {
         type: "project-title-updated",
         title: "Project renamed",
@@ -425,10 +586,7 @@ export async function PATCH(request: NextRequest) {
     return NextResponse.json(
       {
         success: false,
-        message:
-          error instanceof Error
-            ? error.message
-            : "The project could not be updated.",
+        message: projectUpdateErrorMessage(error),
       },
       { status: 500 },
     );
@@ -440,13 +598,15 @@ export async function DELETE(request: NextRequest) {
     await initializeWorkspace();
 
     const body = await request.json();
-    const projectName = cleanProjectName(body.projectName ?? "");
+    let projectName = "";
 
-    if (!projectName) {
+    try {
+      projectName = validateProjectName(String(body.projectName ?? ""));
+    } catch (error) {
       return NextResponse.json(
         {
           success: false,
-          message: "The project name is missing.",
+          message: error instanceof Error ? error.message : "Invalid project name.",
         },
         { status: 400 },
       );

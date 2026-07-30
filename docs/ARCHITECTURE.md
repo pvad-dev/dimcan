@@ -73,7 +73,9 @@ Responsibilities:
 2. Serve specific file content for open/preview/download.
 3. Upload multipart files and classify destination folder.
 4. Delete files from specific folder.
-5. Enforce allowed folders and path boundaries.
+5. Rename files in-place with validation and no-overwrite behavior.
+6. Move files across allowed folders with validation and no-overwrite behavior.
+7. Enforce allowed folders and path boundaries.
 
 ## Storage Paths and Folder Layout
 
@@ -194,13 +196,12 @@ Observed in app/page.tsx, app/archive/page.tsx, and ProjectPageClient.tsx:
 
 Verified from code:
 
-1. File rename and file move UI actions are placeholders and disabled in ProjectPageClient.
-2. No automated tests are present in this repository.
-3. No explicit auth model for API routes.
-4. Workspace path is hard-coded in route handlers.
-5. UI styling is mostly inline and partially duplicated across pages.
-6. app/new-project/page.tsx appears to be a standalone prototype page, separate from the primary creation flow on app/page.tsx.
-7. Mobile and tablet behavior uses flexible layouts but lacks explicit breakpoint-driven design system tokens.
+1. No automated tests are present in this repository.
+2. No explicit auth model for API routes.
+3. Workspace path is hard-coded in route handlers.
+4. UI styling is mostly inline and partially duplicated across pages.
+5. app/new-project/page.tsx appears to be a standalone prototype page, separate from the primary creation flow on app/page.tsx.
+6. Mobile and tablet behavior uses flexible layouts but lacks explicit breakpoint-driven design system tokens.
 
 ## Likely Extension Points
 

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { assemblyComponents as masterAssemblyComponents } from "../../../data/assembly-components";
 import { assemblies as masterAssemblies, type Assembly, type AssemblyComponent, type ComponentStatus, type ProjectAssembly } from "../../../data/assemblies";
@@ -16,6 +17,7 @@ type ProjectFileMeta = {
 };
 
 type FileFilter = "All" | "Drawings" | "Photos" | "Videos" | "Notes" | "Documents";
+type ProjectFolder = Exclude<FileFilter, "All">;
 
 const INLINE_EXTENSIONS = new Set(["pdf", "jpg", "jpeg", "png", "gif", "webp", "bmp", "svg"]);
 
@@ -94,6 +96,12 @@ type ProjectDataPatch = Partial<{
 }>;
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
+
+type WorkspaceProjectActionResponse = {
+  success: boolean;
+  projectName?: string;
+  message?: string;
+};
 
 const NOTE_CATEGORIES: NoteCategory[] = ["General", "Client", "Site", "Scope", "Pricing", "Decision"];
 
@@ -197,6 +205,7 @@ const dayLabel = (iso: string) => {
 };
 
 export default function ProjectPageClient({ projectName }: { projectName: string }) {
+  const router = useRouter();
   const storageKey = `dimcan:projectUnderstanding:${projectName}`;
   const titleStorageKey = `dimcan:projectTitle:${projectName}`;
   const notesStorageKey = `dimcan:projectNotes:${projectName}`;
@@ -208,6 +217,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   const [projectTitle, setProjectTitle] = useState(projectName);
   const [titleDraft, setTitleDraft] = useState(projectName);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [titleError, setTitleError] = useState<string | null>(null);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
 
   const [projectFiles, setProjectFiles] = useState<ProjectFileMeta[]>([]);
@@ -215,6 +225,16 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   const [isFilesLoading, setIsFilesLoading] = useState(true);
   const [filesError, setFilesError] = useState<string | null>(null);
   const [openFileMenuId, setOpenFileMenuId] = useState<string | null>(null);
+  const [fileDialogState, setFileDialogState] = useState<{
+    mode: "rename" | "move";
+    file: ProjectFileMeta;
+  } | null>(null);
+  const [fileDialogFilename, setFileDialogFilename] = useState("");
+  const [fileDialogTargetFolder, setFileDialogTargetFolder] = useState<ProjectFolder>("Documents");
+  const [fileDialogError, setFileDialogError] = useState<string | null>(null);
+  const [fileDialogSuccess, setFileDialogSuccess] = useState<string | null>(null);
+  const [isFileDialogSaving, setIsFileDialogSaving] = useState(false);
+  const fileDialogInputRef = useRef<HTMLInputElement | null>(null);
   const [hoveredFileRowId, setHoveredFileRowId] = useState<string | null>(null);
   const [pressedFileRowId, setPressedFileRowId] = useState<string | null>(null);
   const [focusedFileRowId, setFocusedFileRowId] = useState<string | null>(null);
@@ -291,6 +311,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
 
   const assemblyCategories = useMemo(() => ["All", ...Array.from(new Set(masterAssemblies.map((assembly) => assembly.category)))], []);
   const fileFilters = useMemo<FileFilter[]>(() => ["All", "Drawings", "Photos", "Videos", "Notes", "Documents"], []);
+  const projectFolders = useMemo<ProjectFolder[]>(() => ["Photos", "Videos", "Drawings", "Notes", "Documents"], []);
   const fileFilterCounts = useMemo<Record<FileFilter, number>>(() => {
     const counts: Record<FileFilter, number> = {
       All: projectFiles.length,
@@ -397,6 +418,31 @@ export default function ProjectPageClient({ projectName }: { projectName: string
         setSaveStatus("idle");
         saveStatusTimerRef.current = null;
       }, 1200) as unknown as number;
+    }
+  }, []);
+
+  const migrateLocalProjectStorage = useCallback((fromName: string, toName: string) => {
+    if (typeof window === "undefined" || fromName === toName) {
+      return;
+    }
+
+    const keyPairs: Array<[string, string]> = [
+      [`dimcan:projectUnderstanding:${fromName}`, `dimcan:projectUnderstanding:${toName}`],
+      [`dimcan:projectTitle:${fromName}`, `dimcan:projectTitle:${toName}`],
+      [`dimcan:projectNotes:${fromName}`, `dimcan:projectNotes:${toName}`],
+      [`dimcan:projectActivity:${fromName}`, `dimcan:projectActivity:${toName}`],
+      [`dimcan:projectAttr:${fromName}`, `dimcan:projectAttr:${toName}`],
+      [`dimcan:projectAssemblies:${fromName}`, `dimcan:projectAssemblies:${toName}`],
+      [`dimcan:projectMigrated:${fromName}`, `dimcan:projectMigrated:${toName}`],
+    ];
+
+    for (const [fromKey, toKey] of keyPairs) {
+      const existing = window.localStorage.getItem(fromKey);
+      if (existing === null) {
+        continue;
+      }
+      window.localStorage.setItem(toKey, existing);
+      window.localStorage.removeItem(fromKey);
     }
   }, []);
 
@@ -730,16 +776,65 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     }
   }, [isEditingTitle]);
 
-  const saveTitle = (next: string) => {
-    const t = next.trim() || projectName;
-    setProjectTitle(t);
-    setTitleDraft(t);
-    setIsEditingTitle(false);
-    writeStorageValue(titleStorageKey, t);
-    void saveProjectPatch({ displayTitle: t });
-    appendProjectActivity("project-title-updated", "Project title changed", t);
+  const saveTitle = async (next: string) => {
+    const requestedName = next.trim();
+
+    if (!requestedName) {
+      setTitleError("Enter a project name.");
+      return;
+    }
+
+    if (requestedName === projectName) {
+      setProjectTitle(requestedName);
+      setTitleDraft(requestedName);
+      setIsEditingTitle(false);
+      setTitleError(null);
+      writeStorageValue(titleStorageKey, requestedName);
+      return;
+    }
+
+    setTitleError(null);
+    setSaveStatusWithTimeout("saving");
+
+    try {
+      const response = await fetch("/api/workspace", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "rename",
+          projectName,
+          newProjectName: requestedName,
+        }),
+      });
+
+      const data = await response.json() as WorkspaceProjectActionResponse;
+
+      if (!response.ok || !data.success || !data.projectName) {
+        setSaveStatusWithTimeout("error");
+        setTitleError(data.message ?? "The project could not be renamed.");
+        return;
+      }
+
+      const nextName = data.projectName;
+      migrateLocalProjectStorage(projectName, nextName);
+      writeStorageValue(`dimcan:projectTitle:${nextName}`, nextName);
+
+      setProjectTitle(nextName);
+      setTitleDraft(nextName);
+      setIsEditingTitle(false);
+      setTitleError(null);
+      setSaveStatusWithTimeout("saved");
+
+      router.replace(`/projects/${encodeURIComponent(nextName)}`);
+      router.refresh();
+    } catch {
+      setSaveStatusWithTimeout("error");
+      setTitleError("The project could not be renamed.");
+    }
   };
-  const cancelTitle = () => { setTitleDraft(projectTitle); setIsEditingTitle(false); };
+  const cancelTitle = () => { setTitleDraft(projectTitle); setIsEditingTitle(false); setTitleError(null); };
 
   const getAttrKey = (field: EditingField, index?: number) => index !== undefined ? `${field}:${index}` : field;
   const getAttribution = (field: EditingField, index: number) => attributionState[getAttrKey(field, index)] ?? 'AI';
@@ -847,6 +942,13 @@ export default function ProjectPageClient({ projectName }: { projectName: string
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (fileDialogState?.mode === "rename") {
+      fileDialogInputRef.current?.focus();
+      fileDialogInputRef.current?.select();
+    }
+  }, [fileDialogState]);
 
   useEffect(() => {
     const closeMenuOnOutsideClick = (event: MouseEvent | TouchEvent) => {
@@ -1084,6 +1186,147 @@ export default function ProjectPageClient({ projectName }: { projectName: string
 
     setOpenFileMenuId(null);
     await deleteFile(file);
+  };
+
+  const closeFileDialog = () => {
+    setFileDialogState(null);
+    setFileDialogFilename("");
+    setFileDialogTargetFolder("Documents");
+    setFileDialogError(null);
+    setFileDialogSuccess(null);
+    setIsFileDialogSaving(false);
+  };
+
+  const openRenameDialog = (file: ProjectFileMeta) => {
+    setFileDialogState({ mode: "rename", file });
+    setFileDialogFilename(file.filename);
+    setFileDialogTargetFolder(file.folder as ProjectFolder);
+    setFileDialogError(null);
+    setFileDialogSuccess(null);
+    setIsFileDialogSaving(false);
+  };
+
+  const openMoveDialog = (file: ProjectFileMeta) => {
+    setFileDialogState({ mode: "move", file });
+    setFileDialogFilename(file.filename);
+    setFileDialogTargetFolder(file.folder as ProjectFolder);
+    setFileDialogError(null);
+    setFileDialogSuccess(null);
+    setIsFileDialogSaving(false);
+  };
+
+  const applyUpdatedFileMeta = (sourceFileId: string, updatedFile: ProjectFileMeta) => {
+    setProjectFiles((current) => {
+      const next = current.map((file) => (file.id === sourceFileId ? updatedFile : file));
+      return next.sort((a, b) => Date.parse(b.uploadedAt) - Date.parse(a.uploadedAt));
+    });
+  };
+
+  const submitFileDialog = async () => {
+    if (!fileDialogState || isFileDialogSaving) {
+      return;
+    }
+
+    const sourceFile = fileDialogState.file;
+    setFileDialogError(null);
+    setFileDialogSuccess(null);
+
+    if (fileDialogState.mode === "rename") {
+      const nextFilename = fileDialogFilename.trim();
+      if (!nextFilename) {
+        setFileDialogError("Enter a new filename.");
+        return;
+      }
+
+      if (nextFilename === sourceFile.filename) {
+        setFileDialogError("New filename must be different.");
+        return;
+      }
+    }
+
+    if (fileDialogState.mode === "move") {
+      if (!projectFolders.includes(fileDialogTargetFolder)) {
+        setFileDialogError("Choose a valid destination folder.");
+        return;
+      }
+
+      if (fileDialogTargetFolder === sourceFile.folder) {
+        setFileDialogError("File is already in that folder.");
+        return;
+      }
+    }
+
+    setIsFileDialogSaving(true);
+
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectName)}/files`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(
+          fileDialogState.mode === "rename"
+            ? {
+                action: "rename",
+                folder: sourceFile.folder,
+                filename: sourceFile.filename,
+                newFilename: fileDialogFilename,
+              }
+            : {
+                action: "move",
+                folder: sourceFile.folder,
+                filename: sourceFile.filename,
+                targetFolder: fileDialogTargetFolder,
+              },
+        ),
+      });
+
+      const data = await res.json() as {
+        file?: ProjectFileMeta;
+        message?: string;
+      };
+
+      if (!res.ok || !data.file) {
+        throw new Error(data.message || "File update failed.");
+      }
+
+      applyUpdatedFileMeta(sourceFile.id, data.file);
+
+      if (fileDialogState.mode === "rename") {
+        appendActivity({
+          type: "file-renamed",
+          title: "File renamed",
+          description: `${sourceFile.filename} renamed to ${data.file.filename}.`,
+          source: "user",
+          relatedFile: data.file.filename,
+          relatedFolder: data.file.folder,
+          metadata: {
+            fromFilename: sourceFile.filename,
+            toFilename: data.file.filename,
+            folder: data.file.folder,
+          },
+        });
+        setFileDialogSuccess("File renamed successfully.");
+      } else {
+        appendActivity({
+          type: "file-moved",
+          title: "File moved",
+          description: `${sourceFile.filename} moved from ${sourceFile.folder} to ${data.file.folder}.`,
+          source: "user",
+          relatedFile: data.file.filename,
+          relatedFolder: data.file.folder,
+          metadata: {
+            filename: data.file.filename,
+            fromFolder: sourceFile.folder,
+            toFolder: data.file.folder,
+          },
+        });
+        setFileDialogSuccess("File moved successfully.");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not update this file.";
+      setFileDialogError(message);
+    } finally {
+      setIsFileDialogSaving(false);
+    }
   };
 
   const handleFiles = async (files: FileList | null) => {
@@ -1331,14 +1574,19 @@ export default function ProjectPageClient({ projectName }: { projectName: string
           <p style={{ margin: 0, color: '#766b5d', fontSize: 14 }}>Dimcan Project</p>
           {isEditingTitle ? (
             <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 8 }}>
-              <input ref={titleInputRef} value={titleDraft} onChange={(e) => setTitleDraft(e.target.value)} onKeyDown={(e)=>{ if (e.key==='Enter') saveTitle(titleDraft); if (e.key==='Escape') cancelTitle(); }} onBlur={() => saveTitle(titleDraft)} style={{ fontSize: 28, fontWeight: 700, padding: '8px 12px', borderRadius: 10, border: '1px solid #d8cdbc' }} />
+              <input ref={titleInputRef} value={titleDraft} onChange={(e) => setTitleDraft(e.target.value)} onKeyDown={(e)=>{ if (e.key==='Enter') void saveTitle(titleDraft); if (e.key==='Escape') cancelTitle(); }} onBlur={() => { void saveTitle(titleDraft); }} style={{ fontSize: 28, fontWeight: 700, padding: '8px 12px', borderRadius: 10, border: '1px solid #d8cdbc' }} />
             </div>
           ) : (
-            <h1 onClick={() => setIsEditingTitle(true)} style={{ margin: '8px 0 0', fontSize: 'clamp(26px, 5vw, 32px)', fontWeight: 700, cursor: 'pointer' }}>{projectTitle}</h1>
+            <h1 onClick={() => { setTitleError(null); setIsEditingTitle(true); }} style={{ margin: '8px 0 0', fontSize: 'clamp(26px, 5vw, 32px)', fontWeight: 700, cursor: 'pointer' }}>{projectTitle}</h1>
           )}
           <p style={{ margin: '8px 0 0', color: saveStatus === 'error' ? '#a1260d' : '#9a8f80', fontSize: 12 }}>
             {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? 'Saved' : saveStatus === 'error' ? 'Could not save' : '\u00a0'}
           </p>
+          {titleError && (
+            <p style={{ margin: '6px 0 0', color: '#a1260d', fontSize: 13 }}>
+              {titleError}
+            </p>
+          )}
         </header>
 
         <section
@@ -1531,8 +1779,8 @@ export default function ProjectPageClient({ projectName }: { projectName: string
                             </button>
                             <button onClick={() => { openProjectFile(f, 'browser'); setOpenFileMenuId(null); }} style={{ textAlign: 'left', border: 'none', background: 'transparent', color: '#2f2a24', padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>Open in browser</button>
                             <button onClick={() => { openProjectFile(f, 'download'); setOpenFileMenuId(null); }} style={{ textAlign: 'left', border: 'none', background: 'transparent', color: '#2f2a24', padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>Download to Files</button>
-                            <button disabled style={{ textAlign: 'left', border: 'none', background: 'transparent', color: '#9a8f80', padding: '8px 10px', borderRadius: 8, cursor: 'not-allowed' }}>Rename (Coming later)</button>
-                            <button disabled style={{ textAlign: 'left', border: 'none', background: 'transparent', color: '#9a8f80', padding: '8px 10px', borderRadius: 8, cursor: 'not-allowed' }}>Move to folder (Coming later)</button>
+                            <button onClick={() => { openRenameDialog(f); setOpenFileMenuId(null); }} style={{ textAlign: 'left', border: 'none', background: 'transparent', color: '#2f2a24', padding: '8px 10px', borderRadius: 8, cursor: 'pointer', minHeight: 44 }}>Rename</button>
+                            <button onClick={() => { openMoveDialog(f); setOpenFileMenuId(null); }} style={{ textAlign: 'left', border: 'none', background: 'transparent', color: '#2f2a24', padding: '8px 10px', borderRadius: 8, cursor: 'pointer', minHeight: 44 }}>Move to folder</button>
                             <button onClick={() => { void confirmAndDeleteFile(f); }} style={{ textAlign: 'left', border: 'none', background: 'transparent', color: '#a1260d', padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>Delete</button>
                           </div>
                         )}
@@ -2015,6 +2263,134 @@ export default function ProjectPageClient({ projectName }: { projectName: string
             <div style={{ color: '#766b5d', marginTop: 6 }}><strong>Detected scope:</strong> {understanding.detectedScope.join(', ') || 'None'}</div>
             <div style={{ color: '#766b5d', marginTop: 6 }}><strong>Unresolved missing:</strong> {understanding.missingInformation.length}</div>
             <p style={{ marginTop: 10 }}>Estimate generation will use the confirmed scope, quantities, materials, and company pricing rules.</p>
+          </div>
+        </div>
+      )}
+
+      {fileDialogState && (
+        <div
+          onClick={closeFileDialog}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(32, 25, 19, 0.35)',
+            display: 'grid',
+            placeItems: 'center',
+            zIndex: 60,
+            padding: 14,
+          }}
+        >
+          <div
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: 'min(560px, 100%)',
+              background: '#fffaf2',
+              border: '1px solid #d8cdbc',
+              borderRadius: 14,
+              padding: 16,
+              boxShadow: '0 18px 34px rgba(47,42,36,0.22)',
+            }}
+          >
+            <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>
+              {fileDialogState.mode === 'rename' ? 'Rename file' : 'Move file'}
+            </h3>
+            <p style={{ margin: '8px 0 0', color: '#766b5d', fontSize: 14, wordBreak: 'break-word' }}>
+              {fileDialogState.file.filename} in {fileDialogState.file.folder}
+            </p>
+
+            <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
+              {fileDialogState.mode === 'rename' ? (
+                <label style={{ display: 'grid', gap: 6 }}>
+                  <span style={{ fontSize: 13, color: '#594f43', fontWeight: 700 }}>New filename</span>
+                  <input
+                    ref={fileDialogInputRef}
+                    value={fileDialogFilename}
+                    onChange={(event) => setFileDialogFilename(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        void submitFileDialog();
+                      }
+                    }}
+                    placeholder="Enter file name"
+                    style={{
+                      minHeight: 44,
+                      borderRadius: 8,
+                      border: '1px solid #d8cdbc',
+                      padding: '10px 12px',
+                      fontSize: 14,
+                    }}
+                  />
+                  <span style={{ color: '#8b7f70', fontSize: 12 }}>
+                    If you leave out the extension, the current extension is preserved.
+                  </span>
+                </label>
+              ) : (
+                <label style={{ display: 'grid', gap: 6 }}>
+                  <span style={{ fontSize: 13, color: '#594f43', fontWeight: 700 }}>Destination folder</span>
+                  <select
+                    value={fileDialogTargetFolder}
+                    onChange={(event) => setFileDialogTargetFolder(event.target.value as ProjectFolder)}
+                    style={{
+                      minHeight: 44,
+                      borderRadius: 8,
+                      border: '1px solid #d8cdbc',
+                      padding: '10px 12px',
+                      fontSize: 14,
+                      background: '#fff',
+                    }}
+                  >
+                    {projectFolders.map((folder) => (
+                      <option key={folder} value={folder}>{folder}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+
+              {fileDialogError && (
+                <div style={{ color: '#a1260d', fontSize: 13 }}>{fileDialogError}</div>
+              )}
+              {fileDialogSuccess && (
+                <div style={{ color: '#2f6f42', fontSize: 13 }}>{fileDialogSuccess}</div>
+              )}
+            </div>
+
+            <div style={{ marginTop: 14, display: 'flex', gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+              <button
+                onClick={closeFileDialog}
+                style={{
+                  minHeight: 44,
+                  borderRadius: 8,
+                  border: '1px solid #d8cdbc',
+                  background: '#fffaf2',
+                  color: '#2f2a24',
+                  padding: '10px 14px',
+                  cursor: 'pointer',
+                }}
+              >
+                {fileDialogSuccess ? 'Done' : 'Cancel'}
+              </button>
+              {!fileDialogSuccess && (
+                <button
+                  onClick={() => { void submitFileDialog(); }}
+                  disabled={isFileDialogSaving}
+                  style={{
+                    minHeight: 44,
+                    borderRadius: 8,
+                    border: 'none',
+                    background: '#594f43',
+                    color: '#fff',
+                    padding: '10px 14px',
+                    cursor: isFileDialogSaving ? 'wait' : 'pointer',
+                    opacity: isFileDialogSaving ? 0.75 : 1,
+                  }}
+                >
+                  {isFileDialogSaving
+                    ? fileDialogState.mode === 'rename' ? 'Renaming...' : 'Moving...'
+                    : fileDialogState.mode === 'rename' ? 'Rename file' : 'Move file'}
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}

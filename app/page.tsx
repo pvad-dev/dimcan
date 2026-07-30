@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { buildSuggestedProjectName } from "../lib/project-understanding";
 
 type WorkspaceResponse = {
   success: boolean;
@@ -22,7 +23,10 @@ export default function Home() {
   const [isCreating, setIsCreating] = useState(false);
   const [showNewProject, setShowNewProject] = useState(false);
   const [projectName, setProjectName] = useState("");
+  const [projectNotes, setProjectNotes] = useState("");
+  const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
   const [message, setMessage] = useState("");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   async function loadWorkspace() {
     setIsLoading(true);
@@ -44,11 +48,26 @@ export default function Home() {
     }
   }
 
+  const suggestedProjectName = useMemo(() => buildSuggestedProjectName(
+    uploadedFiles.map((file) => ({ filename: file.name, type: file.type })),
+    projectNotes,
+    projectName,
+  ), [projectName, projectNotes, uploadedFiles]);
+
+  const openFilePicker = () => fileInputRef.current?.click();
+
+  const handleFiles = (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setUploadedFiles((current) => [...current, ...Array.from(files)]);
+  };
+
   async function createProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     setIsCreating(true);
     setMessage("");
+
+    const finalProjectName = (projectName || suggestedProjectName).trim() || "Untitled Project";
 
     try {
       const response = await fetch("/api/workspace", {
@@ -57,7 +76,7 @@ export default function Home() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          projectName,
+          projectName: finalProjectName,
         }),
       });
 
@@ -69,6 +88,8 @@ export default function Home() {
       }
 
       setProjectName("");
+      setProjectNotes("");
+      setUploadedFiles([]);
       setShowNewProject(false);
 
       await loadWorkspace();
@@ -167,6 +188,61 @@ export default function Home() {
             }}
           >
             <form onSubmit={createProject}>
+              <div
+                onClick={openFilePicker}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") openFilePicker();
+                }}
+                style={{
+                  border: "2px dashed #d8cdbc",
+                  borderRadius: "12px",
+                  padding: "24px",
+                  background: "#f8f1e5",
+                  cursor: "pointer",
+                  marginBottom: "16px",
+                  textAlign: "center",
+                }}
+              >
+                <input ref={fileInputRef} type="file" multiple hidden onChange={(event) => handleFiles(event.target.files)} />
+                <div style={{ fontSize: "18px", fontWeight: 700, marginBottom: "6px" }}>Upload files to start a project</div>
+                <div style={{ color: "#766b5d" }}>Drag and drop files here or choose files from your device.</div>
+              </div>
+
+              {uploadedFiles.length > 0 && (
+                <div style={{ marginBottom: "12px", color: "#766b5d" }}>
+                  <strong>Selected files:</strong> {uploadedFiles.map((file) => file.name).join(", ")}
+                </div>
+              )}
+
+              <label
+                htmlFor="projectNotes"
+                style={{
+                  display: "block",
+                  marginBottom: "8px",
+                  fontWeight: 600,
+                }}
+              >
+                Quick notes
+              </label>
+
+              <textarea
+                id="projectNotes"
+                value={projectNotes}
+                onChange={(event) => setProjectNotes(event.target.value)}
+                placeholder="Add a few notes to help generate a project name and understanding..."
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  border: "1px solid #b8aa98",
+                  borderRadius: "8px",
+                  padding: "12px",
+                  minHeight: "100px",
+                  marginBottom: "12px",
+                }}
+              />
+
               <label
                 htmlFor="projectName"
                 style={{
@@ -175,7 +251,7 @@ export default function Home() {
                   fontWeight: 600,
                 }}
               >
-                Project name
+                Optional project name
               </label>
 
               <input
@@ -184,7 +260,6 @@ export default function Home() {
                 value={projectName}
                 onChange={(event) => setProjectName(event.target.value)}
                 placeholder="Example: Master Ensuite"
-                autoFocus
                 style={{
                   width: "100%",
                   boxSizing: "border-box",
@@ -195,6 +270,11 @@ export default function Home() {
                   marginBottom: "12px",
                 }}
               />
+
+              <div style={{ marginBottom: "12px", padding: "10px 12px", background: "#f5eddf", borderRadius: "8px", border: "1px solid #e7dbca" }}>
+                <div style={{ fontSize: "14px", color: "#766b5d", marginBottom: "4px" }}>AI prototype suggestion</div>
+                <div style={{ fontWeight: 700 }}>Suggested project name: {suggestedProjectName}</div>
+              </div>
 
               {message && (
                 <p
@@ -234,6 +314,8 @@ export default function Home() {
                   onClick={() => {
                     setShowNewProject(false);
                     setProjectName("");
+                    setProjectNotes("");
+                    setUploadedFiles([]);
                     setMessage("");
                   }}
                   style={{

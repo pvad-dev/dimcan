@@ -4,6 +4,7 @@ import Link from "next/link";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { assemblyComponents as masterAssemblyComponents } from "../../../data/assembly-components";
 import { assemblies as masterAssemblies, type Assembly, type AssemblyComponent, type ComponentStatus, type ProjectAssembly } from "../../../data/assemblies";
+import { recomputeProjectUnderstanding, type ProjectUnderstanding as PrototypeProjectUnderstanding } from "../../../lib/project-understanding";
 
 type ProjectFileMeta = {
   id: string;
@@ -13,14 +14,7 @@ type ProjectFileMeta = {
   uploadedAt: string;
 };
 
-type ProjectUnderstanding = {
-  projectType: string;
-  confidence: number;
-  detectedFiles: string[];
-  possibleRooms: string[];
-  detectedScope: string[];
-  missingInformation: string[];
-};
+type ProjectUnderstanding = PrototypeProjectUnderstanding;
 
 type EditingField = 'projectType' | 'possibleRooms' | 'detectedScope' | 'missingInformation';
 
@@ -80,59 +74,32 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   const editInputRef = useRef<HTMLInputElement | null>(null);
   const [scopeExpanded, setScopeExpanded] = useState(true);
   const [missingOpen, setMissingOpen] = useState(false);
+  const [showPrototypeDetails, setShowPrototypeDetails] = useState(false);
 
-  // Simple mock understanding generator
-  const generateMockUnderstanding = (files: ProjectFileMeta[]): ProjectUnderstanding => {
-    const images = files.filter((f) => f.type.startsWith("image/") || /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(f.filename));
-    const count = files.length;
-    if (count === 0) {
-      return {
-        projectType: "",
-        confidence: 0,
-        detectedFiles: [],
-        possibleRooms: [],
-        detectedScope: [],
-        missingInformation: [],
-      };
-    }
-
-    const detectedFiles = [`${count} file${count === 1 ? "" : "s"}`];
-
-    if (images.length >= 1) {
-      return {
-        projectType: "Bathroom tile work",
-        confidence: 72,
-        detectedFiles,
-        possibleRooms: ["Bathroom tub surround"],
-        detectedScope: ["Demolition", "Waterproofing", "Wall Tile", "Tile Trim"],
-        missingInformation: [
-          "Is the bathtub staying?",
-          "Confirm wall dimensions",
-          "Confirm selected tile and trim",
-        ],
-      };
-    }
+  const [userUnderstanding, setUserUnderstanding] = useState<Partial<ProjectUnderstanding>>(() => readStorageValue<Partial<ProjectUnderstanding>>(storageKey, {}));
+  const understanding = useMemo<ProjectUnderstanding>(() => {
+    const prototype = recomputeProjectUnderstanding({
+      projectName: projectTitle,
+      notes,
+      files: projectFiles,
+      assemblies: assembliesState.map((item) => ({ assembly: { name: item.assembly.name }, sourceAssemblyId: item.sourceAssemblyId })),
+    });
 
     return {
-      projectType: "General renovation",
-      confidence: 60,
-      detectedFiles,
-      possibleRooms: [],
-      detectedScope: [],
-      missingInformation: [],
+      ...prototype,
+      projectType: userUnderstanding.projectType ?? prototype.projectType,
+      projectContext: userUnderstanding.projectContext ?? prototype.projectContext,
+      confidence: userUnderstanding.confidence ?? prototype.confidence,
+      detectedFiles: userUnderstanding.detectedFiles ?? prototype.detectedFiles,
+      possibleRooms: userUnderstanding.possibleRooms ?? prototype.possibleRooms,
+      detectedScope: userUnderstanding.detectedScope ?? prototype.detectedScope,
+      missingInformation: userUnderstanding.missingInformation ?? prototype.missingInformation,
+      assumptions: userUnderstanding.assumptions ?? prototype.assumptions,
+      detectedAssemblies: userUnderstanding.detectedAssemblies ?? prototype.detectedAssemblies,
+      scope: userUnderstanding.scope ?? prototype.scope,
+      suggestedProjectName: userUnderstanding.suggestedProjectName ?? prototype.suggestedProjectName,
     };
-  };
-
-  const aiUnderstanding = useMemo(() => generateMockUnderstanding(projectFiles), [projectFiles]);
-  const [userUnderstanding, setUserUnderstanding] = useState<Partial<ProjectUnderstanding>>(() => readStorageValue<Partial<ProjectUnderstanding>>(storageKey, {}));
-  const understanding = useMemo(() => ({
-    projectType: userUnderstanding.projectType ?? aiUnderstanding.projectType,
-    confidence: aiUnderstanding.confidence,
-    detectedFiles: aiUnderstanding.detectedFiles,
-    possibleRooms: userUnderstanding.possibleRooms ?? aiUnderstanding.possibleRooms,
-    detectedScope: userUnderstanding.detectedScope ?? aiUnderstanding.detectedScope,
-    missingInformation: userUnderstanding.missingInformation ?? aiUnderstanding.missingInformation,
-  }), [aiUnderstanding, userUnderstanding]);
+  }, [assembliesState, notes, projectFiles, projectTitle, userUnderstanding]);
 
   const [attributionState, setAttributionState] = useState<Record<string, "AI" | "User">>(() => readStorageValue<Record<string, "AI" | "User">>(attrStorageKey, {}));
 
@@ -293,6 +260,32 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     writeStorageValue(storageKey, next);
   };
 
+  const refreshUnderstanding = () => {
+    const next = recomputeProjectUnderstanding({
+      projectName: projectTitle,
+      notes,
+      files: projectFiles,
+      assemblies: assembliesState.map((item) => ({ assembly: { name: item.assembly.name }, sourceAssemblyId: item.sourceAssemblyId })),
+    });
+    setUserUnderstanding({
+      ...userUnderstanding,
+      ...next,
+      projectType: next.projectType,
+      projectContext: next.projectContext,
+      confidence: next.confidence,
+      detectedFiles: next.detectedFiles,
+      possibleRooms: next.possibleRooms,
+      detectedScope: next.detectedScope,
+      missingInformation: next.missingInformation,
+      assumptions: next.assumptions,
+      detectedAssemblies: next.detectedAssemblies,
+      scope: next.scope,
+      suggestedProjectName: next.suggestedProjectName,
+    });
+    writeStorageValue(storageKey, next);
+    pushActivity('Understanding refreshed');
+  };
+
   const beginEdit = (field: EditingField, index: number) => {
     const currentValue = field === 'projectType'
       ? understanding.projectType
@@ -313,7 +306,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     if (editingItem.field === 'projectType') {
       persistUnderstanding({ ...userUnderstanding, projectType: value });
     } else {
-      const currentArray = ((userUnderstanding[editingItem.field] ?? aiUnderstanding[editingItem.field]) ?? []) as string[];
+      const currentArray = (understanding[editingItem.field] ?? []) as string[];
       const nextArray = [...currentArray];
       nextArray[editingItem.index] = value;
       persistUnderstanding({ ...userUnderstanding, [editingItem.field]: nextArray });
@@ -534,42 +527,47 @@ export default function ProjectPageClient({ projectName }: { projectName: string
           </div>
         </section>
 
-        <section style={{ marginBottom: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Project Understanding</h2>
+        <section style={{ marginBottom: 16, background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 12, padding: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Project Understanding</h2>
+              <div style={{ marginTop: 6, color: '#766b5d', fontSize: 13 }}>AI prototype workspace • local deterministic suggestions only</div>
+            </div>
             <div style={{ color: '#766b5d', fontWeight: 700 }}>Confidence: {understanding.confidence}%</div>
           </div>
 
           <div style={{ marginTop: 12, display: 'grid', gap: 12 }}>
             <div style={{ background: '#fff', border: '1px solid #e6dac8', padding: 12, borderRadius: 8 }}>
-              <div style={{ fontWeight: 700 }}>Detected files</div>
-              <div style={{ color: '#766b5d', marginTop: 6 }}>{understanding.detectedFiles.join(', ')}</div>
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>Suggested project name</div>
+              <div style={{ color: '#2f2a24' }}>{understanding.suggestedProjectName || projectTitle}</div>
             </div>
 
             <div style={{ background: '#fff', border: '1px solid #e6dac8', padding: 12, borderRadius: 8 }}>
-              <div style={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <button onClick={() => beginEdit('projectType', 0)} style={{ all: 'unset', cursor: 'pointer', color: '#2f2a24', fontSize: 16, fontWeight: 700 }}>Project type</button>
-                <span style={{ color: '#9a8f80' }}>{getAttribution('projectType', 0) === 'AI' ? '🤖' : '👤 Contractor'}</span>
-              </div>
-              {editingItem?.field === 'projectType' ? (
-                <input ref={editInputRef} value={editingValue} onChange={(e) => setEditingValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') saveUnderstandingEdit(); if (e.key === 'Escape') cancelUnderstandingEdit(); }} onBlur={saveUnderstandingEdit} style={{ width: '100%', marginTop: 8, padding: 8, borderRadius: 8, border: '1px solid #d8cdbc' }} />
-              ) : (
-                <div onClick={() => beginEdit('projectType', 0)} style={{ marginTop: 8, color: '#766b5d', cursor: 'pointer' }}>{understanding.projectType || 'No project type detected'}</div>
-              )}
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>Project context</div>
+              <div style={{ color: '#766b5d' }}>{understanding.projectContext || 'No project context yet'}</div>
             </div>
 
             <div style={{ background: '#fff', border: '1px solid #e6dac8', padding: 12, borderRadius: 8 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ fontWeight: 700 }}>Possible area</div>
+                <div style={{ fontWeight: 700 }}>Inputs</div>
+                <button onClick={() => setShowPrototypeDetails((value) => !value)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#594f43' }}>{showPrototypeDetails ? 'Hide details' : 'Show details'}</button>
               </div>
-              {editingItem?.field === 'possibleRooms' ? (
-                <input ref={editInputRef} value={editingValue} onChange={(e) => setEditingValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') saveUnderstandingEdit(); if (e.key === 'Escape') cancelUnderstandingEdit(); }} onBlur={saveUnderstandingEdit} style={{ width: '100%', marginTop: 8, padding: 8, borderRadius: 8, border: '1px solid #d8cdbc' }} />
-              ) : (
-                <div onClick={() => beginEdit('possibleRooms', 0)} style={{ marginTop: 8, color: '#766b5d', cursor: 'pointer' }}>
-                  <span style={{ marginRight: 8 }}>{getAttribution('possibleRooms', 0) === 'AI' ? '🤖' : '👤'}</span>
-                  {understanding.possibleRooms[0] || 'None detected'}
+              {showPrototypeDetails && (
+                <div style={{ marginTop: 8, display: 'grid', gap: 8 }}>
+                  <div><strong>Files:</strong> {understanding.detectedFiles.join(', ') || 'No files uploaded'}</div>
+                  <div><strong>Notes:</strong> {notes || 'No notes yet'}</div>
+                  <div><strong>Assemblies:</strong> {understanding.detectedAssemblies.join(', ') || 'No assemblies selected'}</div>
                 </div>
               )}
+            </div>
+
+            <div style={{ background: '#fff', border: '1px solid #e6dac8', padding: 12, borderRadius: 8 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>Understanding</div>
+              <div style={{ color: '#766b5d', display: 'grid', gap: 8 }}>
+                <div><strong>Scope:</strong> {understanding.scope.join(' • ') || 'No scope yet'}</div>
+                <div><strong>Assumptions:</strong> {understanding.assumptions.join(' • ') || 'No assumptions yet'}</div>
+                <div><strong>Detected or suggested assemblies:</strong> {understanding.detectedAssemblies.join(', ') || 'No assemblies yet'}</div>
+              </div>
             </div>
 
             <div style={{ background: '#fff', border: '1px solid #e6dac8', padding: 12, borderRadius: 8 }}>
@@ -600,7 +598,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
 
             <div style={{ background: '#fff', border: '1px solid #e6dac8', padding: 12, borderRadius: 8 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ fontWeight: 700 }}>⚠ Possible Missing Information ({understanding.missingInformation.length})</div>
+                <div style={{ fontWeight: 700 }}>⚠ Missing information ({understanding.missingInformation.length})</div>
                 <button onClick={() => setMissingOpen((s) => !s)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 14 }}>{missingOpen ? '▼' : '▶'}</button>
               </div>
               {missingOpen && (
@@ -624,11 +622,10 @@ export default function ProjectPageClient({ projectName }: { projectName: string
               )}
             </div>
 
-            <div style={{ display: 'flex', gap: 12 }}>
-              <button onClick={() => setShowEstimate(true)} style={{ background: '#594f43', color: '#fff', border: 'none', padding: '10px 14px', borderRadius: 8 }}>See AI Estimate</button>
-              <button onClick={() => { setUserUnderstanding({}); try { localStorage.removeItem(storageKey); } catch {}; clearAttribution(); }} style={{ border: '1px solid #d8cdbc', background: '#fffaf2', padding: '10px 14px', borderRadius: 8 }}>Reset to AI Suggestion</button>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+              <button onClick={refreshUnderstanding} style={{ background: '#594f43', color: '#fff', border: 'none', padding: '10px 14px', borderRadius: 8 }}>Refresh Understanding</button>
+              <button onClick={() => { setUserUnderstanding({}); try { localStorage.removeItem(storageKey); } catch {}; clearAttribution(); }} style={{ border: '1px solid #d8cdbc', background: '#fffaf2', padding: '10px 14px', borderRadius: 8 }}>Accept/Edit Suggestions</button>
             </div>
-
           </div>
         </section>
 

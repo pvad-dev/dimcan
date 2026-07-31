@@ -136,6 +136,8 @@ This document defines reusable interface standards for Dimcan Platform, grounded
 5. Full workflow stages use the available workspace width and progressively reveal dense controls.
 6. Activity shows a reasonable recent batch first, supports search/filtering, and loads more without deleting history.
 7. One assembly is selected or expanded at a time unless a future comparison mode is explicitly enabled.
+8. Overview summary cards are the primary stage navigation; the stage tab row is reserved for full workflow stages.
+9. Secondary understanding controls belong inside the AI insight panel rather than in detached page controls.
 
 ## 17) Assemblies Estimating UX
 

@@ -77,7 +77,7 @@ Status is based on repository code inspection at the time of writing.
    - Sticky compact project context and horizontally scrollable stage navigation
    - Overview, Files, Takeoff, Assemblies, Pricing, and Activity stages
    - Deep links through `?stage=` with browser Back/Forward support and per-project stage memory
-   - Concise Overview summaries, AI understanding panel, and five-entry recent activity
+   - Concise Overview summaries with a single Activity entry point and an integrated AI understanding editor action
    - Notes moved into a focused responsive sheet
    - Activity search and incremental 20-entry loading
    - Active-stage-only mounting for full workflows

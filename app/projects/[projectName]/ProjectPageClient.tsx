@@ -421,6 +421,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   const [scopeExpanded, setScopeExpanded] = useState(true);
   const [missingOpen, setMissingOpen] = useState(false);
   const [showPrototypeDetails, setShowPrototypeDetails] = useState(false);
+  const [isUnderstandingEditorOpen, setIsUnderstandingEditorOpen] = useState(false);
 
   const combinedNotesText = useMemo(
     () => projectNotes.map((note) => note.text.trim()).filter(Boolean).join("\n"),
@@ -2646,10 +2647,12 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   return (
     <main className="project-workspace">
       <div className="project-workspace__content">
-        <Link href="/" style={{ display: 'inline-block', marginBottom: 18, color: '#766b5d', textDecoration: 'none' }}>← Back to Workspace</Link>
-
         <header className="project-workspace__header">
-          <p style={{ margin: 0, color: '#766b5d', fontSize: 14 }}>Dimcan Project</p>
+          <Link href="/" className="project-workspace__back" aria-label="Back to Workspace">
+            <span aria-hidden>←</span><span className="project-workspace__back-label">Workspace</span>
+          </Link>
+          <div className="project-workspace__identity">
+          <p className="project-workspace__eyebrow" style={{ margin: 0, color: '#766b5d', fontSize: 14 }}>Dimcan Project</p>
           {isEditingTitle ? (
             <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 8 }}>
               <input ref={titleInputRef} value={titleDraft} onChange={(e) => setTitleDraft(e.target.value)} onKeyDown={(e)=>{ if (e.key==='Enter') void saveTitle(titleDraft); if (e.key==='Escape') cancelTitle(); }} onBlur={() => { void saveTitle(titleDraft); }} style={{ fontSize: 28, fontWeight: 700, padding: '8px 12px', borderRadius: 10, border: '1px solid #d8cdbc' }} />
@@ -2657,7 +2660,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
           ) : (
             <h1 onClick={() => { setTitleError(null); setIsEditingTitle(true); }} className="project-workspace__project-title">{projectTitle}</h1>
           )}
-          <p style={{ margin: '8px 0 0', color: saveStatus === 'error' ? '#a1260d' : '#9a8f80', fontSize: 12 }}>
+          <p className="project-workspace__save-state" style={{ margin: '8px 0 0', color: saveStatus === 'error' ? '#a1260d' : '#9a8f80', fontSize: 12 }}>
             {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? 'Saved' : saveStatus === 'error' ? 'Could not save' : '\u00a0'}
             {computedPricingSummary.hasIncompletePricing ? ` · ${computedPricingSummary.incompleteAssemblies.length} incomplete pricing item${computedPricingSummary.incompleteAssemblies.length === 1 ? "" : "s"}` : ""}
           </p>
@@ -2666,6 +2669,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
               {titleError}
             </p>
           )}
+          </div>
           <div className="project-workspace__header-actions">
             <button onClick={() => activeStage === "files" ? openFilePicker() : navigateToStage("files")}>
               {activeStage === "files" ? "Upload files" : "Open files"}
@@ -2713,6 +2717,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
                 <section className="project-insight">
                   <div><span>AI project understanding</span><h2>{understanding.suggestedProjectName || projectTitle}</h2><p>{understanding.projectContext || "Add project files and notes to build a clearer project understanding."}</p></div>
                   <div className="project-insight__confidence"><strong>{understanding.confidence}%</strong><span>confidence</span></div>
+                  <button className="project-insight__action" onClick={() => setIsUnderstandingEditorOpen((open) => !open)} aria-expanded={isUnderstandingEditorOpen}>
+                    {isUnderstandingEditorOpen ? "Close editor" : "Edit understanding"}
+                  </button>
                 </section>
               </>
             )}
@@ -3501,10 +3508,8 @@ export default function ProjectPageClient({ projectName }: { projectName: string
         </section>
         )}
 
-        {activeStage === "overview" && (
-        <details className="project-understanding-details">
-          <summary>Edit project understanding</summary>
-        <section style={{ marginBottom: 16, background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 12, padding: 16 }}>
+        {activeStage === "overview" && isUnderstandingEditorOpen && (
+        <section className="project-understanding-editor" style={{ marginBottom: 16, background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 12, padding: 16 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             <div>
               <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Project Understanding</h2>
@@ -3609,7 +3614,6 @@ export default function ProjectPageClient({ projectName }: { projectName: string
             </div>
           </div>
         </section>
-        </details>
         )}
 
         {activeStage === "activity" && (

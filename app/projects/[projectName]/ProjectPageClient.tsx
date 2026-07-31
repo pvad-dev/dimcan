@@ -339,6 +339,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   const [isProjectDataLoading, setIsProjectDataLoading] = useState(true);
   const assemblySaveTimerRef = useRef<number | null>(null);
   const takeoffSaveTimerRef = useRef<number | null>(null);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const [editingItem, setEditingItem] = useState<EditingItem | null>(null);
   const [editingValue, setEditingValue] = useState("");
@@ -652,25 +653,33 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     );
   }, [projectName]);
 
-  const saveProjectPatch = useCallback(async (patch: ProjectDataPatch) => {
-    setSaveStatusWithTimeout("saving");
+  const saveProjectPatch = useCallback((patch: ProjectDataPatch) => {
+    const runSave = async () => {
+      setSaveStatusWithTimeout("saving");
 
-    try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(projectName)}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(patch),
-      });
+      try {
+        const res = await fetch(`/api/projects/${encodeURIComponent(projectName)}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(patch),
+        });
 
-      const data = await res.json() as { message?: string };
-      if (!res.ok) {
-        throw new Error(data.message || "Failed to save project data.");
+        const data = await res.json() as { message?: string };
+        if (!res.ok) {
+          throw new Error(data.message || "Failed to save project data.");
+        }
+
+        setSaveStatusWithTimeout("saved");
+        return true;
+      } catch {
+        setSaveStatusWithTimeout("error");
+        return false;
       }
+    };
 
-      setSaveStatusWithTimeout("saved");
-    } catch {
-      setSaveStatusWithTimeout("error");
-    }
+    const queued = saveQueueRef.current.then(runSave, runSave);
+    saveQueueRef.current = queued.then(() => undefined, () => undefined);
+    return queued;
   }, [projectName, setSaveStatusWithTimeout]);
 
   const loadProjectData = useCallback(async () => {
@@ -979,6 +988,10 @@ export default function ProjectPageClient({ projectName }: { projectName: string
         takeoffItems: nextItems,
         takeoffGroups: nextGroups,
         takeoffSettings: nextSettings,
+      }).then((success) => {
+        if (!success) {
+          setTakeoffUiMessage("Could not save takeoff changes. Please retry.");
+        }
       });
       return;
     }
@@ -988,6 +1001,10 @@ export default function ProjectPageClient({ projectName }: { projectName: string
         takeoffItems: nextItems,
         takeoffGroups: nextGroups,
         takeoffSettings: nextSettings,
+      }).then((success) => {
+        if (!success) {
+          setTakeoffUiMessage("Could not save takeoff changes. Please retry.");
+        }
       });
       takeoffSaveTimerRef.current = null;
     }, 450) as unknown as number;

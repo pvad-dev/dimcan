@@ -6,6 +6,26 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import AssembliesPanel from "./AssembliesPanel";
 import { cloneAssembly, normalizeAssemblies, type AssemblyLibraryTemplate, type ProjectAssemblyRecord } from "../../../lib/assembly-estimating";
 import { recomputeProjectUnderstanding, type ProjectUnderstanding as PrototypeProjectUnderstanding } from "../../../lib/project-understanding";
+import {
+  TAKEOFF_CATEGORIES,
+  TAKEOFF_SOURCE_TYPES,
+  TAKEOFF_UNITS,
+  buildTakeoffGroupKey,
+  calculateTakeoffQuantities,
+  createEmptyTakeoffItem,
+  defaultTakeoffSettings,
+  normalizeTakeoffGroups,
+  normalizeTakeoffItems,
+  normalizeTakeoffSettings,
+  summarizeTakeoffByUnit,
+  syncTakeoffGroupsWithItems,
+  withUpdatedTakeoffItem,
+  type TakeoffCategory,
+  type TakeoffGroup,
+  type TakeoffItem,
+  type TakeoffSettings,
+  type TakeoffSourceType,
+} from "../../../lib/takeoff";
 
 type ProjectFileMeta = {
   id: string;
@@ -51,6 +71,12 @@ type ActivityType =
   | "assembly-added"
   | "assembly-edited"
   | "assembly-removed"
+  | "takeoff-created"
+  | "takeoff-edited"
+  | "takeoff-duplicated"
+  | "takeoff-deleted"
+  | "takeoff-linked"
+  | "takeoff-unlinked"
   | "project-archived"
   | "project-restored"
   | "update"
@@ -81,6 +107,9 @@ type PersistedProjectData = {
   notes: ProjectNote[];
   activity: ActivityEntry[];
   assemblies: ProjectAssemblyRecord[];
+  takeoffItems: TakeoffItem[];
+  takeoffGroups: TakeoffGroup[];
+  takeoffSettings: TakeoffSettings;
   understandingOverrides: Partial<ProjectUnderstanding>;
   attributionData: Record<string, "AI" | "User">;
   updatedAt: string;
@@ -91,6 +120,9 @@ type ProjectDataPatch = Partial<{
   notes: ProjectNote[];
   activity: ActivityEntry[];
   assemblies: ProjectAssemblyRecord[];
+  takeoffItems: TakeoffItem[];
+  takeoffGroups: TakeoffGroup[];
+  takeoffSettings: TakeoffSettings;
   understandingOverrides: Partial<ProjectUnderstanding>;
   attributionData: Record<string, "AI" | "User">;
 }>;
@@ -147,6 +179,13 @@ const activityTypeBadge = (type: ActivityType) => {
       return "Files";
     case "project-notes-updated":
       return "Notes";
+    case "takeoff-created":
+    case "takeoff-edited":
+    case "takeoff-duplicated":
+    case "takeoff-deleted":
+    case "takeoff-linked":
+    case "takeoff-unlinked":
+      return "Takeoff";
     case "decision":
       return "Decision";
     case "project-understanding-updated":
@@ -180,9 +219,29 @@ const activityTypeIcon = (type: ActivityType) => {
     case "assembly-edited":
     case "assembly-removed":
       return "⚙";
+    case "takeoff-created":
+      return "▣";
+    case "takeoff-edited":
+      return "◧";
+    case "takeoff-duplicated":
+      return "⧉";
+    case "takeoff-deleted":
+      return "✕";
+    case "takeoff-linked":
+      return "↔";
+    case "takeoff-unlinked":
+      return "⇄";
     default:
       return "•";
   }
+};
+
+const parseTakeoffNumber = (raw: string, fallback = 0) => {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(0, parsed);
 };
 
 const dayLabel = (iso: string) => {
@@ -212,6 +271,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   const activityStorageKey = `dimcan:projectActivity:${projectName}`;
   const attrStorageKey = `dimcan:projectAttr:${projectName}`;
   const assemblyStorageKey = `dimcan:projectAssemblies:${projectName}`;
+  const takeoffItemsStorageKey = `dimcan:projectTakeoffItems:${projectName}`;
+  const takeoffGroupsStorageKey = `dimcan:projectTakeoffGroups:${projectName}`;
+  const takeoffSettingsStorageKey = `dimcan:projectTakeoffSettings:${projectName}`;
   const migrationKey = `dimcan:projectMigrated:${projectName}`;
 
   const [projectTitle, setProjectTitle] = useState(projectName);
@@ -265,8 +327,18 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   const [manualUpdateDescription, setManualUpdateDescription] = useState("");
 
   const [assembliesState, setAssembliesState] = useState<ProjectAssemblyRecord[]>([]);
+  const [takeoffItems, setTakeoffItems] = useState<TakeoffItem[]>([]);
+  const [takeoffGroups, setTakeoffGroups] = useState<TakeoffGroup[]>([]);
+  const [takeoffSettings, setTakeoffSettings] = useState<TakeoffSettings>(defaultTakeoffSettings());
+  const [openTakeoffMenuId, setOpenTakeoffMenuId] = useState<string | null>(null);
+  const [takeoffEditorItemId, setTakeoffEditorItemId] = useState<string | null>(null);
+  const [takeoffDraft, setTakeoffDraft] = useState<TakeoffItem | null>(null);
+  const [takeoffValidationError, setTakeoffValidationError] = useState<string | null>(null);
+  const [takeoffUiMessage, setTakeoffUiMessage] = useState<string | null>(null);
+  const [takeoffExpandedItemId, setTakeoffExpandedItemId] = useState<string | null>(null);
   const [isProjectDataLoading, setIsProjectDataLoading] = useState(true);
   const assemblySaveTimerRef = useRef<number | null>(null);
+  const takeoffSaveTimerRef = useRef<number | null>(null);
 
   const [editingItem, setEditingItem] = useState<EditingItem | null>(null);
   const [editingValue, setEditingValue] = useState("");
@@ -371,6 +443,43 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     return Array.from(groups.entries());
   }, [activityByFilter]);
 
+  const takeoffGroupsByKey = useMemo(() => {
+    return new Map(takeoffGroups.map((group) => [group.key, group]));
+  }, [takeoffGroups]);
+
+  const groupedTakeoffItems = useMemo(() => {
+    const grouped = new Map<string, TakeoffItem[]>();
+
+    for (const item of takeoffItems) {
+      const key = buildTakeoffGroupKey(item.location);
+      const list = grouped.get(key) ?? [];
+      list.push(item);
+      grouped.set(key, list);
+    }
+
+    return Array.from(grouped.entries())
+      .map(([key, items]) => {
+        const group = takeoffGroupsByKey.get(key);
+        const title = group?.name || (key === "unassigned" ? "Unassigned" : items[0]?.location || "Unassigned");
+        const totals = summarizeTakeoffByUnit(items);
+
+        return {
+          key,
+          title,
+          collapsed: group?.collapsed === true,
+          items: items.sort((a, b) => a.name.localeCompare(b.name)),
+          totals,
+        };
+      })
+      .sort((a, b) => {
+        if (a.key === "unassigned") return 1;
+        if (b.key === "unassigned") return -1;
+        return a.title.localeCompare(b.title);
+      });
+  }, [takeoffGroupsByKey, takeoffItems]);
+
+  const projectTakeoffTotals = useMemo(() => summarizeTakeoffByUnit(takeoffItems), [takeoffItems]);
+
   const findProjectFile = useCallback((filename: string | null, folder: string | null) => {
     if (!filename || !folder) {
       return null;
@@ -415,6 +524,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
       [`dimcan:projectActivity:${fromName}`, `dimcan:projectActivity:${toName}`],
       [`dimcan:projectAttr:${fromName}`, `dimcan:projectAttr:${toName}`],
       [`dimcan:projectAssemblies:${fromName}`, `dimcan:projectAssemblies:${toName}`],
+      [`dimcan:projectTakeoffItems:${fromName}`, `dimcan:projectTakeoffItems:${toName}`],
+      [`dimcan:projectTakeoffGroups:${fromName}`, `dimcan:projectTakeoffGroups:${toName}`],
+      [`dimcan:projectTakeoffSettings:${fromName}`, `dimcan:projectTakeoffSettings:${toName}`],
       [`dimcan:projectMigrated:${fromName}`, `dimcan:projectMigrated:${toName}`],
     ];
 
@@ -434,6 +546,15 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     const localActivity = readStorageValue<ActivityEntry[] | string[]>(activityStorageKey, []);
     const localAssembliesRaw = readStorageValue<unknown[]>(assemblyStorageKey, []);
     const localAssemblies = normalizeAssemblies(localAssembliesRaw);
+    const localTakeoffSettingsRaw = readStorageValue<unknown>(takeoffSettingsStorageKey, defaultTakeoffSettings());
+    const localTakeoffSettings = normalizeTakeoffSettings(localTakeoffSettingsRaw);
+    const localTakeoffItemsRaw = readStorageValue<unknown[]>(takeoffItemsStorageKey, []);
+    const localTakeoffItems = normalizeTakeoffItems(localTakeoffItemsRaw, localTakeoffSettings);
+    const localTakeoffGroupsRaw = readStorageValue<unknown[]>(takeoffGroupsStorageKey, []);
+    const localTakeoffGroups = syncTakeoffGroupsWithItems(
+      localTakeoffItems,
+      normalizeTakeoffGroups(localTakeoffGroupsRaw),
+    );
     const localUnderstanding = readStorageValue<Partial<ProjectUnderstanding>>(storageKey, {});
     const localAttribution = readStorageValue<Record<string, "AI" | "User">>(attrStorageKey, {});
 
@@ -472,6 +593,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
       notes: normalizedLocalNotes,
       activity: normalizedLocalActivity,
       assemblies: localAssemblies,
+      takeoffItems: localTakeoffItems,
+      takeoffGroups: localTakeoffGroups,
+      takeoffSettings: localTakeoffSettings,
       understandingOverrides: localUnderstanding,
       attributionData: localAttribution,
     };
@@ -482,6 +606,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
         : normalizedLocalNotes.length > 0 ||
           normalizedLocalActivity.length > 0 ||
           localAssemblies.length > 0 ||
+          localTakeoffItems.length > 0 ||
           Object.keys(localUnderstanding).length > 0 ||
           Object.keys(localAttribution).length > 0;
 
@@ -489,7 +614,18 @@ export default function ProjectPageClient({ projectName }: { projectName: string
       patch,
       hasData,
     };
-  }, [activityStorageKey, assemblyStorageKey, attrStorageKey, notesStorageKey, projectName, storageKey, titleStorageKey]);
+  }, [
+    activityStorageKey,
+    assemblyStorageKey,
+    attrStorageKey,
+    notesStorageKey,
+    projectName,
+    storageKey,
+    takeoffGroupsStorageKey,
+    takeoffItemsStorageKey,
+    takeoffSettingsStorageKey,
+    titleStorageKey,
+  ]);
 
   const applyProjectData = useCallback((project: PersistedProjectData) => {
     const safeTitle = (project.displayTitle || projectName).trim() || projectName;
@@ -499,6 +635,11 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     setProjectNotes(Array.isArray(project.notes) ? project.notes : []);
     setActivity(Array.isArray(project.activity) ? project.activity : []);
     setAssembliesState(normalizeAssemblies(project.assemblies));
+    const normalizedTakeoffSettings = normalizeTakeoffSettings(project.takeoffSettings);
+    const normalizedTakeoffItems = normalizeTakeoffItems(project.takeoffItems, normalizedTakeoffSettings);
+    setTakeoffSettings(normalizedTakeoffSettings);
+    setTakeoffItems(normalizedTakeoffItems);
+    setTakeoffGroups(syncTakeoffGroupsWithItems(normalizedTakeoffItems, normalizeTakeoffGroups(project.takeoffGroups)));
     setUserUnderstanding(
       project.understandingOverrides && typeof project.understandingOverrides === "object"
         ? project.understandingOverrides
@@ -572,13 +713,28 @@ export default function ProjectPageClient({ projectName }: { projectName: string
       const normalizedProject = {
         ...effectiveProject,
         assemblies: normalizeAssemblies(effectiveProject.assemblies),
+        takeoffSettings: normalizeTakeoffSettings(effectiveProject.takeoffSettings),
       };
+      const normalizedTakeoffItems = normalizeTakeoffItems(
+        effectiveProject.takeoffItems,
+        normalizedProject.takeoffSettings,
+      );
+      const normalizedTakeoffGroups = syncTakeoffGroupsWithItems(
+        normalizedTakeoffItems,
+        normalizeTakeoffGroups(effectiveProject.takeoffGroups),
+      );
+
+      normalizedProject.takeoffItems = normalizedTakeoffItems;
+      normalizedProject.takeoffGroups = normalizedTakeoffGroups;
 
       applyProjectData(normalizedProject);
       writeStorageValue(titleStorageKey, normalizedProject.displayTitle);
       writeStorageValue(notesStorageKey, normalizedProject.notes);
       writeStorageValue(activityStorageKey, normalizedProject.activity);
       writeStorageValue(assemblyStorageKey, normalizedProject.assemblies);
+      writeStorageValue(takeoffItemsStorageKey, normalizedProject.takeoffItems);
+      writeStorageValue(takeoffGroupsStorageKey, normalizedProject.takeoffGroups);
+      writeStorageValue(takeoffSettingsStorageKey, normalizedProject.takeoffSettings);
       writeStorageValue(storageKey, normalizedProject.understandingOverrides);
       writeStorageValue(attrStorageKey, normalizedProject.attributionData);
     } catch {
@@ -589,6 +745,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
         notes: fallbackLocal.patch.notes || [],
         activity: fallbackLocal.patch.activity || [],
         assemblies: fallbackLocal.patch.assemblies || [],
+        takeoffItems: fallbackLocal.patch.takeoffItems || [],
+        takeoffGroups: fallbackLocal.patch.takeoffGroups || [],
+        takeoffSettings: fallbackLocal.patch.takeoffSettings || defaultTakeoffSettings(),
         understandingOverrides: fallbackLocal.patch.understandingOverrides || {},
         attributionData: fallbackLocal.patch.attributionData || {},
         updatedAt: new Date().toISOString(),
@@ -597,7 +756,21 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     } finally {
       setIsProjectDataLoading(false);
     }
-  }, [activityStorageKey, applyProjectData, assemblyStorageKey, attrStorageKey, getLocalFallbackProjectData, migrationKey, notesStorageKey, projectName, storageKey, titleStorageKey]);
+  }, [
+    activityStorageKey,
+    applyProjectData,
+    assemblyStorageKey,
+    attrStorageKey,
+    getLocalFallbackProjectData,
+    migrationKey,
+    notesStorageKey,
+    projectName,
+    storageKey,
+    takeoffGroupsStorageKey,
+    takeoffItemsStorageKey,
+    takeoffSettingsStorageKey,
+    titleStorageKey,
+  ]);
 
   const loadProjectFiles = useCallback(async () => {
     setIsFilesLoading(true);
@@ -782,6 +955,461 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     }
   }, [appendActivity, assembliesState, persistAssemblies]);
 
+  const persistTakeoffSnapshot = useCallback((
+    nextItems: TakeoffItem[],
+    nextGroups: TakeoffGroup[],
+    nextSettings: TakeoffSettings,
+    mode: "debounced" | "immediate" = "debounced",
+  ) => {
+    setTakeoffItems(nextItems);
+    setTakeoffGroups(nextGroups);
+    setTakeoffSettings(nextSettings);
+
+    writeStorageValue(takeoffItemsStorageKey, nextItems);
+    writeStorageValue(takeoffGroupsStorageKey, nextGroups);
+    writeStorageValue(takeoffSettingsStorageKey, nextSettings);
+
+    if (takeoffSaveTimerRef.current) {
+      window.clearTimeout(takeoffSaveTimerRef.current);
+      takeoffSaveTimerRef.current = null;
+    }
+
+    if (mode === "immediate") {
+      void saveProjectPatch({
+        takeoffItems: nextItems,
+        takeoffGroups: nextGroups,
+        takeoffSettings: nextSettings,
+      });
+      return;
+    }
+
+    takeoffSaveTimerRef.current = window.setTimeout(() => {
+      void saveProjectPatch({
+        takeoffItems: nextItems,
+        takeoffGroups: nextGroups,
+        takeoffSettings: nextSettings,
+      });
+      takeoffSaveTimerRef.current = null;
+    }, 450) as unknown as number;
+  }, [saveProjectPatch, takeoffGroupsStorageKey, takeoffItemsStorageKey, takeoffSettingsStorageKey]);
+
+  const updateAssembliesFromTakeoffLinks = useCallback((
+    previousItem: TakeoffItem | null,
+    nextItem: TakeoffItem,
+    reason: "created" | "edited" | "duplicated",
+  ) => {
+    const previousLinked = new Set(previousItem?.linkedAssemblyIds ?? []);
+    const nextLinked = new Set(nextItem.linkedAssemblyIds);
+
+    const newlyLinked = Array.from(nextLinked).filter((id) => !previousLinked.has(id));
+    const removedLinks = Array.from(previousLinked).filter((id) => !nextLinked.has(id));
+
+    let nextAssemblies = assembliesState;
+    let assembliesChanged = false;
+    const resolvedLinked = new Set<string>(nextItem.linkedAssemblyIds);
+    const unlinkNameList: string[] = [];
+    const linkNameList: string[] = [];
+
+    for (const assemblyId of newlyLinked) {
+      const target = nextAssemblies.find((assembly) => assembly.id === assemblyId);
+      if (!target) {
+        resolvedLinked.delete(assemblyId);
+        continue;
+      }
+
+      if (target.takeoffControl?.takeoffItemId && target.takeoffControl.takeoffItemId !== nextItem.id) {
+        const shouldReassign = window.confirm(
+          `${target.name} is already controlled by another takeoff item. Reassign control to ${nextItem.name}?`,
+        );
+        if (!shouldReassign) {
+          resolvedLinked.delete(assemblyId);
+          continue;
+        }
+      }
+
+      if (!target.takeoffControl?.takeoffItemId && Math.abs(target.quantity - nextItem.calculatedQuantity) > 0.0001) {
+        const shouldOverwrite = window.confirm(
+          `Linking ${target.name} will set its quantity from ${target.quantity} to ${nextItem.calculatedQuantity}. Continue?`,
+        );
+        if (!shouldOverwrite) {
+          resolvedLinked.delete(assemblyId);
+          continue;
+        }
+      }
+
+      linkNameList.push(target.name);
+      assembliesChanged = true;
+      nextAssemblies = nextAssemblies.map((assembly) => (
+        assembly.id === assemblyId
+          ? {
+              ...assembly,
+              quantity: nextItem.calculatedQuantity,
+              takeoffControl: {
+                takeoffItemId: nextItem.id,
+                takeoffItemName: nextItem.name,
+                unit: nextItem.unit,
+                linkedAt: new Date().toISOString(),
+              },
+              updatedAt: new Date().toISOString(),
+            }
+          : assembly
+      ));
+    }
+
+    for (const assemblyId of removedLinks) {
+      const target = nextAssemblies.find((assembly) => assembly.id === assemblyId);
+      if (!target) {
+        continue;
+      }
+      unlinkNameList.push(target.name);
+      assembliesChanged = true;
+      nextAssemblies = nextAssemblies.map((assembly) => (
+        assembly.id === assemblyId
+          ? {
+              ...assembly,
+              takeoffControl: undefined,
+              updatedAt: new Date().toISOString(),
+            }
+          : assembly
+      ));
+    }
+
+    // Keep linked assemblies synchronized for this item.
+    nextAssemblies = nextAssemblies.map((assembly) => {
+      if (assembly.takeoffControl?.takeoffItemId !== nextItem.id) {
+        return assembly;
+      }
+
+      const shouldUpdate =
+        Math.abs(assembly.quantity - nextItem.calculatedQuantity) > 0.0001 ||
+        assembly.takeoffControl.takeoffItemName !== nextItem.name ||
+        assembly.takeoffControl.unit !== nextItem.unit;
+
+      if (!shouldUpdate) {
+        return assembly;
+      }
+
+      assembliesChanged = true;
+      return {
+        ...assembly,
+        quantity: nextItem.calculatedQuantity,
+        takeoffControl: {
+          ...assembly.takeoffControl,
+          takeoffItemName: nextItem.name,
+          unit: nextItem.unit,
+        },
+        updatedAt: new Date().toISOString(),
+      };
+    });
+
+    if (assembliesChanged) {
+      persistAssemblies(nextAssemblies, "immediate");
+    }
+
+    const finalLinkedIds = Array.from(resolvedLinked);
+    const normalizedItem = { ...nextItem, linkedAssemblyIds: finalLinkedIds };
+
+    if (linkNameList.length > 0) {
+      appendActivity({
+        type: "takeoff-linked",
+        title: "Takeoff linked to assemblies",
+        description: `${normalizedItem.name} linked to ${linkNameList.length} assembly${linkNameList.length === 1 ? "" : "ies"}.`,
+        source: "user",
+        relatedFile: null,
+        relatedFolder: null,
+        metadata: {
+          takeoffItemId: normalizedItem.id,
+          assemblyNames: linkNameList,
+          trigger: reason,
+        },
+      });
+    }
+
+    if (unlinkNameList.length > 0) {
+      appendActivity({
+        type: "takeoff-unlinked",
+        title: "Takeoff unlinked from assemblies",
+        description: `${normalizedItem.name} unlinked from ${unlinkNameList.length} assembly${unlinkNameList.length === 1 ? "" : "ies"}.`,
+        source: "user",
+        relatedFile: null,
+        relatedFolder: null,
+        metadata: {
+          takeoffItemId: normalizedItem.id,
+          assemblyNames: unlinkNameList,
+          trigger: reason,
+        },
+      });
+    }
+
+    return normalizedItem;
+  }, [appendActivity, assembliesState, persistAssemblies]);
+
+  const openTakeoffCreate = () => {
+    setTakeoffDraft(createEmptyTakeoffItem(takeoffSettings));
+    setTakeoffEditorItemId(null);
+    setTakeoffValidationError(null);
+    setTakeoffUiMessage(null);
+  };
+
+  const openTakeoffEdit = (itemId: string) => {
+    const item = takeoffItems.find((entry) => entry.id === itemId);
+    if (!item) {
+      return;
+    }
+    setTakeoffDraft({ ...item });
+    setTakeoffEditorItemId(itemId);
+    setTakeoffValidationError(null);
+    setTakeoffUiMessage(null);
+  };
+
+  const closeTakeoffEditor = () => {
+    setTakeoffDraft(null);
+    setTakeoffEditorItemId(null);
+    setTakeoffValidationError(null);
+  };
+
+  const saveTakeoffDraft = () => {
+    if (!takeoffDraft) {
+      return;
+    }
+
+    const trimmedName = takeoffDraft.name.trim();
+    if (!trimmedName) {
+      setTakeoffValidationError("Item name is required.");
+      return;
+    }
+
+    const updated = withUpdatedTakeoffItem({
+      ...takeoffDraft,
+      name: trimmedName,
+      sourceFile: takeoffDraft.sourceType === "manual" ? "" : takeoffDraft.sourceFile,
+    });
+
+    const previousItem = takeoffEditorItemId
+      ? takeoffItems.find((item) => item.id === takeoffEditorItemId) ?? null
+      : null;
+    const linkedResult = updateAssembliesFromTakeoffLinks(previousItem, updated, previousItem ? "edited" : "created");
+    const nextItem = linkedResult ?? updated;
+
+    const baseItems = previousItem
+      ? takeoffItems.map((item) => (item.id === previousItem.id ? nextItem : item))
+      : [nextItem, ...takeoffItems];
+    const nextGroups = syncTakeoffGroupsWithItems(baseItems, takeoffGroups);
+
+    persistTakeoffSnapshot(baseItems, nextGroups, takeoffSettings, "immediate");
+
+    if (!previousItem) {
+      appendActivity({
+        type: "takeoff-created",
+        title: "Takeoff item created",
+        description: `${nextItem.name} added in ${nextItem.location || "Unassigned"}.`,
+        source: "user",
+        relatedFile: null,
+        relatedFolder: null,
+        metadata: { takeoffItemId: nextItem.id, unit: nextItem.unit, quantity: nextItem.calculatedQuantity },
+      });
+    } else {
+      const prevSnapshot = JSON.stringify({
+        name: previousItem.name,
+        category: previousItem.category,
+        location: previousItem.location,
+        quantity: previousItem.quantity,
+        length: previousItem.length,
+        width: previousItem.width,
+        height: previousItem.height,
+        deduction: previousItem.deduction,
+        wastePercent: previousItem.wastePercent,
+        calculatedQuantity: previousItem.calculatedQuantity,
+        notes: previousItem.notes,
+        sourceType: previousItem.sourceType,
+        sourceFile: previousItem.sourceFile,
+        linkedAssemblyIds: previousItem.linkedAssemblyIds,
+      });
+      const nextSnapshot = JSON.stringify({
+        name: nextItem.name,
+        category: nextItem.category,
+        location: nextItem.location,
+        quantity: nextItem.quantity,
+        length: nextItem.length,
+        width: nextItem.width,
+        height: nextItem.height,
+        deduction: nextItem.deduction,
+        wastePercent: nextItem.wastePercent,
+        calculatedQuantity: nextItem.calculatedQuantity,
+        notes: nextItem.notes,
+        sourceType: nextItem.sourceType,
+        sourceFile: nextItem.sourceFile,
+        linkedAssemblyIds: nextItem.linkedAssemblyIds,
+      });
+
+      if (prevSnapshot !== nextSnapshot) {
+        appendActivity({
+          type: "takeoff-edited",
+          title: "Takeoff item updated",
+          description: `${nextItem.name} was updated.`,
+          source: "user",
+          relatedFile: null,
+          relatedFolder: null,
+          metadata: { takeoffItemId: nextItem.id },
+        });
+      }
+    }
+
+    setTakeoffUiMessage(previousItem ? "Takeoff item saved." : "Takeoff item created.");
+    closeTakeoffEditor();
+  };
+
+  const duplicateTakeoffItem = (itemId: string) => {
+    const source = takeoffItems.find((entry) => entry.id === itemId);
+    if (!source) {
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const duplicated = withUpdatedTakeoffItem({
+      ...source,
+      id: makeId(),
+      name: `${source.name} (Copy)`,
+      linkedAssemblyIds: [],
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const nextItems = [duplicated, ...takeoffItems];
+    const nextGroups = syncTakeoffGroupsWithItems(nextItems, takeoffGroups);
+    persistTakeoffSnapshot(nextItems, nextGroups, takeoffSettings, "immediate");
+
+    appendActivity({
+      type: "takeoff-duplicated",
+      title: "Takeoff item duplicated",
+      description: `${source.name} duplicated as ${duplicated.name}.`,
+      source: "user",
+      relatedFile: null,
+      relatedFolder: null,
+      metadata: { takeoffItemId: duplicated.id, sourceTakeoffItemId: source.id },
+    });
+
+    setTakeoffUiMessage("Takeoff item duplicated.");
+    setOpenTakeoffMenuId(null);
+  };
+
+  const deleteTakeoffItem = (itemId: string) => {
+    const source = takeoffItems.find((entry) => entry.id === itemId);
+    if (!source) {
+      return;
+    }
+
+    if (!window.confirm(`Delete takeoff item "${source.name}"?`)) {
+      return;
+    }
+
+    if (source.linkedAssemblyIds.length > 0) {
+      const shouldUnlink = window.confirm(
+        `${source.linkedAssemblyIds.length} linked assembly quantity control(s) will be removed while keeping current assembly quantities. Continue?`,
+      );
+      if (!shouldUnlink) {
+        return;
+      }
+    }
+
+    let nextAssemblies = assembliesState;
+    for (const assemblyId of source.linkedAssemblyIds) {
+      nextAssemblies = nextAssemblies.map((assembly) => (
+        assembly.id === assemblyId && assembly.takeoffControl?.takeoffItemId === source.id
+          ? { ...assembly, takeoffControl: undefined, updatedAt: new Date().toISOString() }
+          : assembly
+      ));
+    }
+    if (nextAssemblies !== assembliesState) {
+      persistAssemblies(nextAssemblies, "immediate");
+      appendActivity({
+        type: "takeoff-unlinked",
+        title: "Takeoff unlinked from assemblies",
+        description: `${source.name} unlinked from ${source.linkedAssemblyIds.length} assembly${source.linkedAssemblyIds.length === 1 ? "" : "ies"}.`,
+        source: "user",
+        relatedFile: null,
+        relatedFolder: null,
+        metadata: { takeoffItemId: source.id, assemblyIds: source.linkedAssemblyIds },
+      });
+    }
+
+    const nextItems = takeoffItems.filter((entry) => entry.id !== itemId);
+    const nextGroups = syncTakeoffGroupsWithItems(nextItems, takeoffGroups);
+    persistTakeoffSnapshot(nextItems, nextGroups, takeoffSettings, "immediate");
+
+    appendActivity({
+      type: "takeoff-deleted",
+      title: "Takeoff item deleted",
+      description: `${source.name} was removed.`,
+      source: "user",
+      relatedFile: null,
+      relatedFolder: null,
+      metadata: { takeoffItemId: source.id },
+    });
+
+    setOpenTakeoffMenuId(null);
+    setTakeoffUiMessage("Takeoff item deleted.");
+  };
+
+  const toggleTakeoffGroupCollapse = (groupKey: string) => {
+    const now = new Date().toISOString();
+    const existing = takeoffGroups.find((group) => group.key === groupKey);
+    const nextGroups = existing
+      ? takeoffGroups.map((group) => group.key === groupKey ? { ...group, collapsed: !group.collapsed, updatedAt: now } : group)
+      : syncTakeoffGroupsWithItems(takeoffItems, takeoffGroups).map((group) => group.key === groupKey ? { ...group, collapsed: true, updatedAt: now } : group);
+
+    persistTakeoffSnapshot(takeoffItems, nextGroups, takeoffSettings, "immediate");
+  };
+
+  const updateTakeoffSettings = (patch: Partial<TakeoffSettings>) => {
+    const nextSettings = normalizeTakeoffSettings({ ...takeoffSettings, ...patch });
+    const nextItems = [...takeoffItems];
+    const nextGroups = syncTakeoffGroupsWithItems(nextItems, takeoffGroups);
+    persistTakeoffSnapshot(nextItems, nextGroups, nextSettings, "immediate");
+  };
+
+  const sourceTypeFolderMap: Record<TakeoffSourceType, ProjectFolder | null> = {
+    manual: null,
+    drawing: "Drawings",
+    photo: "Photos",
+    note: "Notes",
+    document: "Documents",
+  };
+
+  const updateTakeoffDraftField = <K extends keyof TakeoffItem>(field: K, value: TakeoffItem[K]) => {
+    setTakeoffDraft((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const draftBase = {
+        ...current,
+        [field]: value,
+      };
+
+      const withSource = field === "sourceType" && value === "manual"
+        ? { ...draftBase, sourceFile: "" }
+        : draftBase;
+
+      return withUpdatedTakeoffItem(withSource);
+    });
+  };
+
+  const openTakeoffSourcePreview = (item: TakeoffItem) => {
+    const sourceFolder = sourceTypeFolderMap[item.sourceType];
+    if (!sourceFolder || !item.sourceFile) {
+      return;
+    }
+
+    const file = projectFiles.find((entry) => entry.folder === sourceFolder && entry.filename === item.sourceFile);
+    if (!file) {
+      return;
+    }
+
+    setFileActionError(null);
+    openProjectFile(file, "preview", false);
+  };
+
   // Title editing
   useEffect(() => {
     if (isEditingTitle) {
@@ -953,6 +1581,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
       }
       if (assemblySaveTimerRef.current) {
         window.clearTimeout(assemblySaveTimerRef.current);
+      }
+      if (takeoffSaveTimerRef.current) {
+        window.clearTimeout(takeoffSaveTimerRef.current);
       }
       for (const timerId of Object.values(noteSaveTimersRef.current)) {
         window.clearTimeout(timerId);
@@ -1900,6 +2531,185 @@ export default function ProjectPageClient({ projectName }: { projectName: string
           </div>
         </section>
 
+        <section style={{ marginBottom: 16, background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 12, padding: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Takeoff</h2>
+              <div style={{ marginTop: 6, color: saveStatus === 'error' ? '#a1260d' : '#766b5d', fontSize: 12 }}>
+                {isProjectDataLoading ? 'Loading takeoff...' : saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? 'Saved' : saveStatus === 'error' ? 'Could not save' : 'Manual takeoff inputs'}
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button
+                onClick={() => updateTakeoffSettings({ showAdvancedFields: !takeoffSettings.showAdvancedFields })}
+                style={{ minHeight: 44, border: '1px solid #d8cdbc', background: '#fff', borderRadius: 8, padding: '10px 12px', cursor: 'pointer' }}
+              >
+                {takeoffSettings.showAdvancedFields ? 'Hide advanced fields' : 'Show advanced fields'}
+              </button>
+              <label style={{ display: 'flex', gap: 6, alignItems: 'center', border: '1px solid #d8cdbc', background: '#fff', borderRadius: 8, minHeight: 44, padding: '6px 8px' }}>
+                <span style={{ fontSize: 12, color: '#594f43', fontWeight: 700 }}>Default waste %</span>
+                <input
+                  value={takeoffSettings.defaultWastePercent}
+                  onChange={(event) => updateTakeoffSettings({ defaultWastePercent: parseTakeoffNumber(event.target.value, 0) })}
+                  inputMode="decimal"
+                  style={{ width: 72, minHeight: 34, borderRadius: 6, border: '1px solid #d8cdbc', padding: '6px 8px' }}
+                />
+              </label>
+              <button
+                onClick={openTakeoffCreate}
+                style={{ minHeight: 44, border: 'none', background: '#594f43', color: '#fff', borderRadius: 8, padding: '10px 14px', cursor: 'pointer' }}
+              >
+                Create item
+              </button>
+            </div>
+          </div>
+
+          {takeoffUiMessage && (
+            <div style={{ marginTop: 10, border: '1px solid #c7dec8', background: '#eef9ef', color: '#2f6f42', borderRadius: 8, padding: '10px 12px' }}>
+              {takeoffUiMessage}
+            </div>
+          )}
+
+          <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {TAKEOFF_UNITS.map((unit) => (
+              <div key={unit} style={{ border: '1px solid #d8cdbc', background: '#fff', borderRadius: 999, padding: '6px 10px', fontSize: 12, color: '#594f43' }}>
+                <strong>{unit.toUpperCase()}</strong> net {projectTakeoffTotals[unit].net} • final {projectTakeoffTotals[unit].final}
+              </div>
+            ))}
+          </div>
+
+          {isProjectDataLoading ? (
+            <div style={{ marginTop: 12, border: '1px dashed #d8cdbc', borderRadius: 8, padding: 12, color: '#766b5d' }}>
+              Loading takeoff data...
+            </div>
+          ) : takeoffItems.length === 0 ? (
+            <div style={{ marginTop: 12, border: '1px dashed #d8cdbc', borderRadius: 8, padding: 12, color: '#766b5d' }}>
+              No takeoff items yet. Add measurable areas by room or location, then link them to assemblies to control quantities.
+            </div>
+          ) : (
+            <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
+              {groupedTakeoffItems.map((group) => (
+                <div key={group.key} style={{ border: '1px solid #e6dac8', borderRadius: 10, background: '#fff', overflow: 'hidden' }}>
+                  <button
+                    onClick={() => toggleTakeoffGroupCollapse(group.key)}
+                    style={{ width: '100%', textAlign: 'left', border: 'none', borderBottom: '1px solid #eee2d3', background: '#fbf5ec', padding: '10px 12px', minHeight: 44, cursor: 'pointer' }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <div style={{ fontWeight: 700 }}>{group.collapsed ? '▶' : '▼'} {group.title} ({group.items.length})</div>
+                      <div style={{ color: '#766b5d', fontSize: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        {TAKEOFF_UNITS.map((unit) => (
+                          <span key={`${group.key}-${unit}`}>{unit}: {group.totals[unit].final}</span>
+                        ))}
+                      </div>
+                    </div>
+                  </button>
+
+                  {!group.collapsed && (
+                    <div style={{ display: 'grid', gap: 8, padding: 10 }}>
+                      {group.items.map((item) => {
+                        const quantities = calculateTakeoffQuantities(item);
+                        const isExpanded = takeoffExpandedItemId === item.id;
+                        const sourceFolder = sourceTypeFolderMap[item.sourceType];
+                        const sourceFile = sourceFolder
+                          ? projectFiles.find((entry) => entry.folder === sourceFolder && entry.filename === item.sourceFile)
+                          : null;
+                        const linkedNames = assembliesState
+                          .filter((assembly) => item.linkedAssemblyIds.includes(assembly.id))
+                          .map((assembly) => assembly.name);
+
+                        return (
+                          <div
+                            key={item.id}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => setTakeoffExpandedItemId((current) => current === item.id ? null : item.id)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault();
+                                setTakeoffExpandedItemId((current) => current === item.id ? null : item.id);
+                              }
+                            }}
+                            style={{ border: '1px solid #e6dac8', borderRadius: 10, background: '#fffaf6', padding: 10, cursor: 'pointer' }}
+                          >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ fontWeight: 700, wordBreak: 'break-word' }}>{item.name}</div>
+                                <div style={{ marginTop: 4, color: '#766b5d', fontSize: 13 }}>
+                                  {item.category} • {item.location || 'Unassigned'} • {item.calculatedQuantity} {item.unit}
+                                </div>
+                                <div style={{ marginTop: 4, color: '#594f43', fontSize: 12 }}>
+                                  Net {quantities.netQuantity} {item.unit} • Final {item.calculatedQuantity} {item.unit} with {item.wastePercent}% waste
+                                </div>
+                                <div style={{ marginTop: 4, color: '#8b7f70', fontSize: 12 }}>
+                                  Source: {item.sourceType === 'manual' ? 'Manual input' : `${item.sourceType} ${item.sourceFile ? `• ${item.sourceFile}` : ''}`}
+                                </div>
+                              </div>
+                              <div style={{ position: 'relative' }}>
+                                <button
+                                  onClick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    setOpenTakeoffMenuId((current) => current === item.id ? null : item.id);
+                                  }}
+                                  style={{ width: 44, height: 44, borderRadius: 10, border: '1px solid #d8cdbc', background: '#fff', cursor: 'pointer' }}
+                                  aria-label={`Takeoff options for ${item.name}`}
+                                >
+                                  ⋯
+                                </button>
+                                {openTakeoffMenuId === item.id && (
+                                  <div
+                                    onClick={(event) => {
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                    }}
+                                    style={{ position: 'absolute', right: 0, top: 46, zIndex: 25, minWidth: 170, border: '1px solid #d8cdbc', borderRadius: 10, background: '#fffaf2', boxShadow: '0 10px 20px rgba(47,42,36,0.12)', padding: 6, display: 'grid', gap: 4 }}
+                                  >
+                                    <button onClick={() => { openTakeoffEdit(item.id); setOpenTakeoffMenuId(null); }} style={{ textAlign: 'left', border: 'none', background: 'transparent', minHeight: 44, padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>Edit</button>
+                                    <button onClick={() => duplicateTakeoffItem(item.id)} style={{ textAlign: 'left', border: 'none', background: 'transparent', minHeight: 44, padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>Duplicate</button>
+                                    <button onClick={() => deleteTakeoffItem(item.id)} style={{ textAlign: 'left', border: 'none', background: 'transparent', color: '#a1260d', minHeight: 44, padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>Delete</button>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            {isExpanded && (
+                              <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid #ece0d1', color: '#4b453d', fontSize: 13, display: 'grid', gap: 6 }}>
+                                <div>Direct quantity: {item.quantity}</div>
+                                <div>Dimensions: L {item.length} × W {item.width} × H {item.height}</div>
+                                <div>Deduction: {item.deduction}</div>
+                                {item.notes && <div><strong>Notes:</strong> {item.notes}</div>}
+                                {linkedNames.length > 0 && (
+                                  <div><strong>Linked assemblies:</strong> {linkedNames.join(', ')}</div>
+                                )}
+                                {item.sourceType !== 'manual' && item.sourceFile && (
+                                  sourceFile ? (
+                                    <button
+                                      onClick={(event) => {
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        openTakeoffSourcePreview(item);
+                                      }}
+                                      style={{ justifySelf: 'start', minHeight: 36, border: '1px solid #d8cdbc', background: '#fff', borderRadius: 8, padding: '6px 10px', cursor: 'pointer' }}
+                                    >
+                                      Open source file
+                                    </button>
+                                  ) : (
+                                    <div style={{ color: '#9a8f80' }}>Source file unavailable: {item.sourceFile}</div>
+                                  )
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
         <AssembliesPanel
           assemblies={assembliesState}
           isLoading={isProjectDataLoading}
@@ -2182,6 +2992,165 @@ export default function ProjectPageClient({ projectName }: { projectName: string
             <div style={{ color: '#766b5d', marginTop: 6 }}><strong>Detected scope:</strong> {understanding.detectedScope.join(', ') || 'None'}</div>
             <div style={{ color: '#766b5d', marginTop: 6 }}><strong>Unresolved missing:</strong> {understanding.missingInformation.length}</div>
             <p style={{ marginTop: 10 }}>Estimate generation will use the confirmed scope, quantities, materials, and company pricing rules.</p>
+          </div>
+        </div>
+      )}
+
+      {takeoffDraft && (
+        <div onClick={closeTakeoffEditor} style={{ position: 'fixed', inset: 0, background: 'rgba(32, 25, 19, 0.35)', display: 'grid', placeItems: 'center', zIndex: 70, padding: 14 }}>
+          <div onClick={(event) => event.stopPropagation()} style={{ width: 'min(920px, 100%)', maxHeight: '90vh', overflow: 'auto', background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 14, padding: 16, boxShadow: '0 18px 34px rgba(47,42,36,0.22)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <h3 style={{ margin: 0, fontSize: 19, fontWeight: 700 }}>{takeoffEditorItemId ? 'Edit takeoff item' : 'Create takeoff item'}</h3>
+              <button onClick={closeTakeoffEditor} style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', background: '#fff', padding: '10px 12px', cursor: 'pointer' }}>Cancel</button>
+            </div>
+
+            {takeoffValidationError && (
+              <div style={{ marginTop: 10, border: '1px solid #e4b6ac', background: '#fff0ed', color: '#7d2613', borderRadius: 8, padding: '10px 12px' }}>
+                {takeoffValidationError}
+              </div>
+            )}
+
+            <div style={{ marginTop: 12, display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+              <label style={{ display: 'grid', gap: 6 }}>
+                <span>Name</span>
+                <input value={takeoffDraft.name} onChange={(event) => updateTakeoffDraftField('name', event.target.value)} style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px' }} />
+              </label>
+              <label style={{ display: 'grid', gap: 6 }}>
+                <span>Category</span>
+                <select value={takeoffDraft.category} onChange={(event) => updateTakeoffDraftField('category', event.target.value as TakeoffCategory)} style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px', background: '#fff' }}>
+                  {TAKEOFF_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}
+                </select>
+              </label>
+              <label style={{ display: 'grid', gap: 6 }}>
+                <span>Location (room/area)</span>
+                <input value={takeoffDraft.location} onChange={(event) => updateTakeoffDraftField('location', event.target.value)} placeholder="Example: Main Bathroom" style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px' }} />
+              </label>
+              <label style={{ display: 'grid', gap: 6 }}>
+                <span>Unit</span>
+                <select value={takeoffDraft.unit} onChange={(event) => updateTakeoffDraftField('unit', event.target.value as TakeoffItem['unit'])} style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px', background: '#fff' }}>
+                  {TAKEOFF_UNITS.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
+                </select>
+              </label>
+            </div>
+
+            <div style={{ marginTop: 12, border: '1px solid #e6dac8', borderRadius: 10, background: '#fff', padding: 10, display: 'grid', gap: 8 }}>
+              <div style={{ fontWeight: 700 }}>Quantity input</div>
+              <div style={{ display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
+                <label style={{ display: 'grid', gap: 6 }}>
+                  <span>Direct quantity</span>
+                  <input value={takeoffDraft.quantity} onChange={(event) => updateTakeoffDraftField('quantity', parseTakeoffNumber(event.target.value, 0))} inputMode="decimal" style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px' }} />
+                </label>
+                <label style={{ display: 'grid', gap: 6 }}>
+                  <span>Length</span>
+                  <input value={takeoffDraft.length} onChange={(event) => updateTakeoffDraftField('length', parseTakeoffNumber(event.target.value, 0))} inputMode="decimal" style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px' }} />
+                </label>
+                <label style={{ display: 'grid', gap: 6 }}>
+                  <span>Width</span>
+                  <input value={takeoffDraft.width} onChange={(event) => updateTakeoffDraftField('width', parseTakeoffNumber(event.target.value, 0))} inputMode="decimal" style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px' }} />
+                </label>
+                <label style={{ display: 'grid', gap: 6 }}>
+                  <span>Height</span>
+                  <input value={takeoffDraft.height} onChange={(event) => updateTakeoffDraftField('height', parseTakeoffNumber(event.target.value, 0))} inputMode="decimal" style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px' }} />
+                </label>
+              </div>
+
+              <div style={{ display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
+                <label style={{ display: 'grid', gap: 6 }}>
+                  <span>Deduction</span>
+                  <input value={takeoffDraft.deduction} onChange={(event) => updateTakeoffDraftField('deduction', parseTakeoffNumber(event.target.value, 0))} inputMode="decimal" style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px' }} />
+                </label>
+                <label style={{ display: 'grid', gap: 6 }}>
+                  <span>Waste %</span>
+                  <input value={takeoffDraft.wastePercent} onChange={(event) => updateTakeoffDraftField('wastePercent', parseTakeoffNumber(event.target.value, 0))} inputMode="decimal" style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px' }} />
+                </label>
+              </div>
+
+              <div style={{ color: '#594f43', fontSize: 13 }}>
+                Net: {calculateTakeoffQuantities(takeoffDraft).netQuantity} {takeoffDraft.unit} • Final with waste: {takeoffDraft.calculatedQuantity} {takeoffDraft.unit}
+              </div>
+            </div>
+
+            {takeoffSettings.showAdvancedFields && (
+              <div style={{ marginTop: 12, border: '1px solid #e6dac8', borderRadius: 10, background: '#fff', padding: 10, display: 'grid', gap: 10 }}>
+                <div style={{ fontWeight: 700 }}>Advanced details</div>
+                <label style={{ display: 'grid', gap: 6 }}>
+                  <span>Source type</span>
+                  <select value={takeoffDraft.sourceType} onChange={(event) => updateTakeoffDraftField('sourceType', event.target.value as TakeoffSourceType)} style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px', background: '#fff' }}>
+                    {TAKEOFF_SOURCE_TYPES.map((sourceType) => <option key={sourceType} value={sourceType}>{sourceType}</option>)}
+                  </select>
+                </label>
+
+                {takeoffDraft.sourceType === 'manual' ? (
+                  <div style={{ color: '#766b5d', fontSize: 13 }}>Manual takeoff marked as manual input.</div>
+                ) : (
+                  <label style={{ display: 'grid', gap: 6 }}>
+                    <span>Source file (optional)</span>
+                    <select
+                      value={takeoffDraft.sourceFile}
+                      onChange={(event) => updateTakeoffDraftField('sourceFile', event.target.value)}
+                      style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px', background: '#fff' }}
+                    >
+                      <option value="">No source selected</option>
+                      {projectFiles
+                        .filter((file) => file.folder === sourceTypeFolderMap[takeoffDraft.sourceType])
+                        .map((file) => (
+                          <option key={`${file.folder}:${file.filename}`} value={file.filename}>{file.filename}</option>
+                        ))}
+                    </select>
+                  </label>
+                )}
+
+                <label style={{ display: 'grid', gap: 6 }}>
+                  <span>Notes</span>
+                  <textarea value={takeoffDraft.notes} onChange={(event) => updateTakeoffDraftField('notes', event.target.value)} style={{ minHeight: 76, borderRadius: 8, border: '1px solid #d8cdbc', padding: 10 }} />
+                </label>
+              </div>
+            )}
+
+            <div style={{ marginTop: 12, border: '1px solid #e6dac8', borderRadius: 10, background: '#fff', padding: 10, display: 'grid', gap: 8 }}>
+              <div style={{ fontWeight: 700 }}>Link assemblies</div>
+              {assembliesState.length === 0 ? (
+                <div style={{ color: '#766b5d', fontSize: 13 }}>No project assemblies available to link yet.</div>
+              ) : (
+                <div style={{ display: 'grid', gap: 6 }}>
+                  {assembliesState.map((assembly) => {
+                    const checked = takeoffDraft.linkedAssemblyIds.includes(assembly.id);
+                    return (
+                      <label key={assembly.id} style={{ border: '1px solid #ece0d1', borderRadius: 8, padding: '8px 10px', display: 'flex', gap: 10, alignItems: 'flex-start', background: checked ? '#f4ecdf' : '#fff' }}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(event) => {
+                            const isChecked = event.target.checked;
+                            const linked = isChecked
+                              ? Array.from(new Set([...takeoffDraft.linkedAssemblyIds, assembly.id]))
+                              : takeoffDraft.linkedAssemblyIds.filter((id) => id !== assembly.id);
+                            updateTakeoffDraftField('linkedAssemblyIds', linked);
+                          }}
+                          style={{ width: 18, height: 18, marginTop: 2 }}
+                        />
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontWeight: 700 }}>{assembly.name}</div>
+                          <div style={{ marginTop: 2, color: '#766b5d', fontSize: 12 }}>
+                            Current quantity: {assembly.quantity} {assembly.unit}
+                            {assembly.takeoffControl?.takeoffItemId
+                              ? ` • Controlled by ${assembly.takeoffControl.takeoffItemName}`
+                              : ''}
+                          </div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div style={{ marginTop: 12, display: 'flex', justifyContent: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
+              <button onClick={closeTakeoffEditor} style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', background: '#fff', padding: '10px 12px', cursor: 'pointer' }}>Cancel</button>
+              <button onClick={saveTakeoffDraft} style={{ minHeight: 44, borderRadius: 8, border: 'none', background: '#594f43', color: '#fff', padding: '10px 14px', cursor: 'pointer' }}>
+                {takeoffEditorItemId ? 'Save item' : 'Create item'}
+              </button>
+            </div>
           </div>
         </div>
       )}

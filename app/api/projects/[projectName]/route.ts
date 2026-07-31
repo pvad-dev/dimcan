@@ -2,6 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  defaultTakeoffSettings,
+  normalizeTakeoffGroups,
+  normalizeTakeoffItems,
+  normalizeTakeoffSettings,
+  syncTakeoffGroupsWithItems,
+  type TakeoffGroup,
+  type TakeoffItem,
+  type TakeoffSettings,
+} from "../../../../lib/takeoff";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,6 +32,12 @@ const ACTIVITY_TYPES = [
   "assembly-added",
   "assembly-edited",
   "assembly-removed",
+  "takeoff-created",
+  "takeoff-edited",
+  "takeoff-duplicated",
+  "takeoff-deleted",
+  "takeoff-linked",
+  "takeoff-unlinked",
   "project-archived",
   "project-restored",
   "update",
@@ -62,6 +78,9 @@ type ProjectData = {
   notes: ProjectNote[];
   activity: ActivityEntry[];
   assemblies: unknown[];
+  takeoffItems: TakeoffItem[];
+  takeoffGroups: TakeoffGroup[];
+  takeoffSettings: TakeoffSettings;
   understandingOverrides: Record<string, unknown>;
   attributionData: Record<string, "AI" | "User">;
   updatedAt: string;
@@ -72,6 +91,9 @@ type ProjectPatch = Partial<{
   notes: ProjectNote[];
   activity: ActivityEntry[];
   assemblies: unknown[];
+  takeoffItems: TakeoffItem[];
+  takeoffGroups: TakeoffGroup[];
+  takeoffSettings: TakeoffSettings;
   understandingOverrides: Record<string, unknown>;
   attributionData: Record<string, "AI" | "User">;
 }>;
@@ -223,12 +245,19 @@ function getProjectFilePath(projectPath: string) {
 }
 
 function createDefaultProjectData(projectName: string): ProjectData {
+  const takeoffSettings = defaultTakeoffSettings();
+  const takeoffItems = normalizeTakeoffItems([], takeoffSettings);
+  const takeoffGroups = syncTakeoffGroupsWithItems(takeoffItems, []);
+
   return {
     schemaVersion: PROJECT_SCHEMA_VERSION,
     displayTitle: projectName,
     notes: [],
     activity: [],
     assemblies: [],
+    takeoffItems,
+    takeoffGroups,
+    takeoffSettings,
     understandingOverrides: {},
     attributionData: {},
     updatedAt: new Date().toISOString(),
@@ -237,6 +266,12 @@ function createDefaultProjectData(projectName: string): ProjectData {
 
 function normalizeProjectData(raw: unknown, projectName: string): ProjectData {
   const source = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const takeoffSettings = normalizeTakeoffSettings(source.takeoffSettings);
+  const takeoffItems = normalizeTakeoffItems(source.takeoffItems, takeoffSettings);
+  const takeoffGroups = syncTakeoffGroupsWithItems(
+    takeoffItems,
+    normalizeTakeoffGroups(source.takeoffGroups),
+  );
 
   const migratedNotes = (() => {
     if (Array.isArray(source.notes)) {
@@ -262,7 +297,7 @@ function normalizeProjectData(raw: unknown, projectName: string): ProjectData {
   const migratedActivity = (() => {
     if (Array.isArray(source.activity) && source.activity.every((item) => typeof item === "string")) {
       return (source.activity as string[])
-        .map((entry) => {
+        .map((entry): ActivityEntry | null => {
           const text = sanitizeText(entry, 5000);
           if (!text) {
             return null;
@@ -279,7 +314,7 @@ function normalizeProjectData(raw: unknown, projectName: string): ProjectData {
             metadata: { migratedFrom: "string[]" },
           };
         })
-        .filter((item): item is ActivityEntry => Boolean(item));
+        .filter((item): item is ActivityEntry => item !== null);
     }
 
     if (Array.isArray(source.activity)) {
@@ -300,6 +335,9 @@ function normalizeProjectData(raw: unknown, projectName: string): ProjectData {
     notes: migratedNotes,
     activity: dedupeActivity(migratedActivity),
     assemblies: Array.isArray(source.assemblies) ? source.assemblies : [],
+    takeoffItems,
+    takeoffGroups,
+    takeoffSettings,
     understandingOverrides:
       source.understandingOverrides && typeof source.understandingOverrides === "object"
         ? (source.understandingOverrides as Record<string, unknown>)
@@ -326,6 +364,7 @@ function isProjectDataEffectivelyEmpty(project: ProjectData, projectName: string
     project.notes.length === 0 &&
     project.activity.length === 0 &&
     project.assemblies.length === 0 &&
+    project.takeoffItems.length === 0 &&
     Object.keys(project.understandingOverrides).length === 0 &&
     Object.keys(project.attributionData).length === 0
   );
@@ -390,6 +429,20 @@ function mergePatch(current: ProjectData, patch: ProjectPatch, projectName: stri
   if (Array.isArray(patch.assemblies)) {
     next.assemblies = patch.assemblies;
   }
+
+  if (patch.takeoffSettings && typeof patch.takeoffSettings === "object") {
+    next.takeoffSettings = normalizeTakeoffSettings(patch.takeoffSettings);
+  }
+
+  if (Array.isArray(patch.takeoffItems)) {
+    next.takeoffItems = normalizeTakeoffItems(patch.takeoffItems, next.takeoffSettings);
+  }
+
+  if (Array.isArray(patch.takeoffGroups)) {
+    next.takeoffGroups = normalizeTakeoffGroups(patch.takeoffGroups);
+  }
+
+  next.takeoffGroups = syncTakeoffGroupsWithItems(next.takeoffItems, next.takeoffGroups);
 
   if (patch.understandingOverrides && typeof patch.understandingOverrides === "object") {
     next.understandingOverrides = patch.understandingOverrides;

@@ -93,6 +93,7 @@ export default function AssembliesPanel({
     () => assemblies.find((assembly) => assembly.id === editorAssemblyId) ?? null,
     [assemblies, editorAssemblyId],
   );
+  const isTakeoffControlled = editorMode === "edit" && Boolean(editingAssembly?.takeoffControl);
 
   const filteredLibraryTemplates = useMemo(() => {
     const normalizedSearch = librarySearch.trim().toLowerCase();
@@ -458,6 +459,11 @@ export default function AssembliesPanel({
                     <div style={{ marginTop: 4, color: "#8b7f70", fontSize: 12 }}>
                       {assembly.sourceTemplateId ? `Project assembly from Library template ${assembly.sourceTemplateId}` : "Project assembly"}
                     </div>
+                    {assembly.takeoffControl && (
+                      <div style={{ marginTop: 4, color: "#594f43", fontSize: 12, fontWeight: 700 }}>
+                        Quantity controlled by Takeoff: {assembly.takeoffControl.takeoffItemName}
+                      </div>
+                    )}
                   </div>
                   <div style={{ position: "relative", display: "flex", gap: 8 }}>
                     <button
@@ -613,6 +619,11 @@ export default function AssembliesPanel({
                 {validationError}
               </div>
             )}
+            {isTakeoffControlled && editingAssembly?.takeoffControl && (
+              <div style={{ marginTop: 10, border: "1px solid #d8cdbc", background: "#fff", color: "#594f43", borderRadius: 8, padding: "10px 12px" }}>
+                Quantity is controlled by Takeoff item {editingAssembly.takeoffControl.takeoffItemName}. Unlink it in the Takeoff section to edit this quantity manually.
+              </div>
+            )}
 
             <div style={{ marginTop: 12, display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
               <label style={{ display: "grid", gap: 6 }}>
@@ -627,7 +638,7 @@ export default function AssembliesPanel({
               </label>
               <label style={{ display: "grid", gap: 6 }}>
                 <span>Quantity</span>
-                <input value={draft.quantity} onChange={(event) => updateDraftField("quantity", parseNumberInput(event.target.value, 1))} inputMode="decimal" style={{ minHeight: 44, borderRadius: 8, border: "1px solid #d8cdbc", padding: "10px 12px" }} />
+                <input value={draft.quantity} onChange={(event) => updateDraftField("quantity", parseNumberInput(event.target.value, 1))} inputMode="decimal" disabled={isTakeoffControlled} style={{ minHeight: 44, borderRadius: 8, border: "1px solid #d8cdbc", padding: "10px 12px", background: isTakeoffControlled ? "#f8f1e6" : "#fff", color: isTakeoffControlled ? "#766b5d" : "#2f2a24" }} />
               </label>
               <label style={{ display: "grid", gap: 6 }}>
                 <span>Unit</span>

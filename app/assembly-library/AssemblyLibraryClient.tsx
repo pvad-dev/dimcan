@@ -236,13 +236,15 @@ export default function AssemblyLibraryClient() {
     setError(null);
 
     try {
+      const calculated = applyAssemblyCalculations({
+        ...draft,
+        name: draft.name.trim(),
+        updatedAt: new Date().toISOString(),
+      });
+
       const payload = {
-        ...applyAssemblyCalculations({
-          ...draft,
-          name: draft.name.trim(),
-          archivedAt: draft.archivedAt,
-          updatedAt: new Date().toISOString(),
-        }),
+        ...calculated,
+        archivedAt: draft.archivedAt,
       };
 
       const response = await fetch("/api/assembly-library", {

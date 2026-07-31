@@ -28,9 +28,17 @@ export type AssemblyLineItem = {
   notes: string;
 };
 
+export type TakeoffAssemblyControl = {
+  takeoffItemId: string;
+  takeoffItemName: string;
+  unit: string;
+  linkedAt: string;
+};
+
 export type ProjectAssemblyRecord = {
   id: string;
   sourceTemplateId?: string;
+  takeoffControl?: TakeoffAssemblyControl;
   name: string;
   category: AssemblyCategory;
   description: string;
@@ -48,7 +56,7 @@ export type ProjectAssemblyRecord = {
   updatedAt: string;
 };
 
-export type AssemblyLibraryTemplate = Omit<ProjectAssemblyRecord, "sourceTemplateId"> & {
+export type AssemblyLibraryTemplate = Omit<ProjectAssemblyRecord, "sourceTemplateId" | "takeoffControl"> & {
   archivedAt: string | null;
 };
 
@@ -112,6 +120,25 @@ const safeIso = (value: unknown) => {
     return new Date().toISOString();
   }
   return new Date(time).toISOString();
+};
+
+const normalizeTakeoffControl = (value: unknown): TakeoffAssemblyControl | undefined => {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const source = value as Record<string, unknown>;
+  const takeoffItemId = safeText(source.takeoffItemId, 120);
+  if (!takeoffItemId) {
+    return undefined;
+  }
+
+  return {
+    takeoffItemId,
+    takeoffItemName: safeText(source.takeoffItemName, 200) || "Takeoff item",
+    unit: safeText(source.unit, 40) || "sf",
+    linkedAt: safeIso(source.linkedAt),
+  };
 };
 
 const makeId = () => {
@@ -232,6 +259,7 @@ export const normalizeAssemblyRecord = (raw: unknown): ProjectAssemblyRecord | n
   const normalized: ProjectAssemblyRecord = {
     id: safeText(source.id, 120) || makeId(),
     sourceTemplateId: safeText(source.sourceTemplateId, 120) || undefined,
+    takeoffControl: normalizeTakeoffControl(source.takeoffControl),
     name: safeText(source.name, 200) || "Untitled assembly",
     category: validCategory(source.category),
     description: safeText(source.description, 1000),
@@ -309,6 +337,7 @@ export const applyAssemblyCalculations = (assembly: ProjectAssemblyRecord): Proj
   return {
     ...assembly,
     sourceTemplateId: safeText(assembly.sourceTemplateId, 120) || undefined,
+    takeoffControl: normalizeTakeoffControl(assembly.takeoffControl),
     name: safeText(assembly.name, 200),
     category: validCategory(assembly.category),
     description: safeText(assembly.description, 1000),
@@ -351,10 +380,12 @@ export const normalizeLibraryTemplate = (raw: unknown): AssemblyLibraryTemplate 
   }
 
   const source = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const { sourceTemplateId: _sourceTemplateId, takeoffControl: _takeoffControl, ...templateBase } = normalized;
+  void _sourceTemplateId;
+  void _takeoffControl;
 
   return {
-    ...normalized,
-    sourceTemplateId: undefined,
+    ...templateBase,
     archivedAt: typeof source.archivedAt === "string" ? safeIso(source.archivedAt) : null,
   };
 };
@@ -375,13 +406,16 @@ export const createTemplateFromProjectAssembly = (assembly: ProjectAssemblyRecor
     ...assembly,
     id: makeId(),
     sourceTemplateId: undefined,
+    takeoffControl: undefined,
     createdAt: now,
     updatedAt: now,
   });
+  const { sourceTemplateId: _sourceTemplateId, takeoffControl: _takeoffControl, ...templateBase } = normalized;
+  void _sourceTemplateId;
+  void _takeoffControl;
 
   return {
-    ...normalized,
-    sourceTemplateId: undefined,
+    ...templateBase,
     archivedAt: null,
   };
 };
@@ -392,6 +426,7 @@ export const createProjectAssemblyFromTemplate = (template: AssemblyLibraryTempl
     ...template,
     id: makeId(),
     sourceTemplateId: template.id,
+    takeoffControl: undefined,
     createdAt: now,
     updatedAt: now,
   });
@@ -405,6 +440,7 @@ export const cloneTemplate = (template: AssemblyLibraryTemplate): AssemblyLibrar
     ...template,
     id: makeId(),
     sourceTemplateId: undefined,
+    takeoffControl: undefined,
     name: `${template.name} (Copy)`,
     createdAt: now,
     updatedAt: now,
@@ -413,10 +449,12 @@ export const cloneTemplate = (template: AssemblyLibraryTemplate): AssemblyLibrar
     equipmentItems: template.equipmentItems.map((item) => ({ ...item, id: makeId() })),
     subcontractItems: template.subcontractItems.map((item) => ({ ...item, id: makeId() })),
   });
+  const { sourceTemplateId: _sourceTemplateId, takeoffControl: _takeoffControl, ...templateBase } = cloned;
+  void _sourceTemplateId;
+  void _takeoffControl;
 
   return {
-    ...cloned,
-    sourceTemplateId: undefined,
+    ...templateBase,
     archivedAt: null,
   };
 };
@@ -444,6 +482,7 @@ export const isMeaningfullyDifferentAssembly = (
     name: value.name,
     category: value.category,
     description: value.description,
+    takeoffControl: value.takeoffControl,
     quantity: value.quantity,
     unit: value.unit,
     labourItems: value.labourItems,

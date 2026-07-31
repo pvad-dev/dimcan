@@ -2712,11 +2712,6 @@ export default function ProjectPageClient({ projectName }: { projectName: string
                   <div><span>AI project understanding</span><h2>{understanding.suggestedProjectName || projectTitle}</h2><p>{understanding.projectContext || "Add project files and notes to build a clearer project understanding."}</p></div>
                   <div className="project-insight__confidence"><strong>{understanding.confidence}%</strong><span>confidence</span></div>
                 </section>
-                <section className="project-overview__activity">
-                  <div className="project-overview__section-heading"><div><span>Recent activity</span><h2>Latest project changes</h2></div><button onClick={() => navigateToStage("activity")}>View full history</button></div>
-                  {activity.slice(0, 5).map((entry) => <div className="project-overview__activity-row" key={entry.id}><span>{activityTypeIcon(entry.type)}</span><div><strong>{entry.title}</strong><small>{new Date(entry.timestamp).toLocaleString()}</small></div></div>)}
-                  {activity.length === 0 && <p className="project-empty">Project updates will appear here.</p>}
-                </section>
               </>
             )}
           </div>

@@ -2680,15 +2680,17 @@ export default function ProjectPageClient({ projectName }: { projectName: string
           </div>
         </header>
 
-        <nav className="project-workspace__tabs" aria-label="Project stages">
-          {PROJECT_STAGES.map((stage) => (
-            <button key={stage.id} className={activeStage === stage.id ? "is-active" : ""} aria-current={activeStage === stage.id ? "page" : undefined} onClick={() => navigateToStage(stage.id)}>
-              {stage.label}
-              {stage.id === "files" && <span>{projectFiles.length}</span>}
-              {stage.id === "activity" && <span>{activity.length}</span>}
-            </button>
-          ))}
-        </nav>
+        {activeStage !== "overview" && (
+          <nav className="project-workspace__tabs" aria-label="Project stages">
+            {PROJECT_STAGES.map((stage) => (
+              <button key={stage.id} className={activeStage === stage.id ? "is-active" : ""} aria-current={activeStage === stage.id ? "page" : undefined} onClick={() => navigateToStage(stage.id)}>
+                {stage.label}
+                {stage.id === "files" && <span>{projectFiles.length}</span>}
+                {stage.id === "activity" && <span>{activity.length}</span>}
+              </button>
+            ))}
+          </nav>
+        )}
 
         {activeStage === "overview" && (
           <div className="project-overview">

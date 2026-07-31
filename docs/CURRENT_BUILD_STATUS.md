@@ -58,6 +58,13 @@ Status is based on repository code inspection at the time of writing.
    - Accessible from Workspace and Project Assemblies
 12. Save state indicators:
    - Saving, Saved, Could not save
+13. Project pricing workflow:
+   - Project-level pricing settings persisted in project.json (PST/GST enable, rates, tax base, percent-adjustment base)
+   - Project-level pricing adjustments (allowance, discount, contingency, overhead, custom) with add/edit/duplicate/enable-disable/delete
+   - Centralized pricing summary utility that combines assemblies, takeoff-linked assembly quantities, adjustments, and configurable taxes
+   - Pricing summary section on project page with compact totals and expandable detailed breakdown
+   - Incomplete pricing visibility when assemblies are missing quantity/cost or have broken takeoff links
+   - Structured activity entries for meaningful pricing setting changes and adjustment lifecycle actions
 13. Archive and restore activity logging from workspace API.
 14. Project rename hardening:
    - Workspace rename validates trimmed names and rejects invalid Windows characters, reserved names, trailing spaces/periods, empty names, and duplicate folders.
@@ -88,7 +95,7 @@ Status is based on repository code inspection at the time of writing.
 4. File operations rely on local filesystem availability and permissions.
 5. Duplicate style logic across pages increases long-term maintenance cost.
 6. app/new-project/page.tsx appears disconnected from current primary creation flow.
-7. Tax handling in assemblies is configurable but currently informational; GST/PST is not yet fully computed in totals.
+7. Assembly-level taxHandling remains informational at assembly level; project-level tax treatment now uses configurable project pricing settings.
 
 ## Untested or Not Verified During This Documentation Task
 
@@ -119,6 +126,7 @@ Status is based on repository code inspection at the time of writing.
 5. Add pagination/virtualization strategy for large activity and file lists.
 6. Define integration contract layer for future supplier/estimating/execution/warranty modules.
 7. Add automated UI tests for activity event coverage (open/share/download/rename/move/reset actions).
+8. Add quotation output/export layer using pricingSummary as source of truth.
 
 ## Confidence and Uncertainty
 

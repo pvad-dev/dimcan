@@ -135,7 +135,10 @@ Primary structure in app/api/projects/[projectName]/route.ts:
 5. assemblies: ProjectAssemblyRecord[]
 6. understandingOverrides: Record<string, unknown>
 7. attributionData: Record<string, "AI" | "User">
-8. updatedAt: string (ISO)
+8. pricingSettings: PricingSettings
+9. pricingAdjustments: PricingAdjustment[]
+10. pricingSummary: PricingSummary
+11. updatedAt: string (ISO)
 
 ProjectNote:
 
@@ -199,6 +202,15 @@ Migration behavior implemented:
 2. Legacy string[] activity migrates to structured entries.
 3. Activity is deduped and sorted newest-first.
 4. Legacy assembly template records are normalized into the structured assembly model.
+5. Pricing fields are backward-compatible: missing pricingSettings, pricingAdjustments, and pricingSummary are defaulted and normalized.
+
+Pricing model behavior:
+
+1. Pricing calculations are centralized in lib/project-pricing.ts.
+2. Assembly line-item and markup math continues to come from lib/assembly-estimating.ts; pricing does not duplicate assembly math.
+3. Pricing summary includes labour/material/equipment/subcontract subtotals, cost subtotal, assembly markup, selling subtotal, project adjustments, pre-tax subtotal, configurable PST/GST, and final total.
+4. Project-level PST/GST rates and tax base selection are configurable per project.
+5. Incomplete pricing state is surfaced when assemblies have missing quantity/cost/link integrity issues.
 
 ## Security and Path Validation
 
@@ -236,6 +248,7 @@ Important scope note:
 6. Automatic project-history entry creation for key user actions (file upload/delete/open/download/share/link copy, note lifecycle, manual updates, understanding changes)
 7. Assemblies management UI with reusable cost model, debounced autosave, and summary calculations
 8. Assembly Library page and project-level import/save bridge for reusable templates
+9. Project pricing summary UI with project-level tax settings and reusable adjustment workflow persisted in project.json
 
 ## Current UI Patterns in Code
 

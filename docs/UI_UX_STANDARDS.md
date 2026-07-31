@@ -130,6 +130,18 @@ This document defines reusable interface standards for Dimcan Platform, grounded
 5. Avoid activity noise: create one structured activity entry per create/duplicate/delete and one meaningful edit entry per edit session.
 6. Clearly label estimating assumptions (for example waste application and current tax handling approach).
 
+## 17) Project Pricing UX
+
+1. Provide a compact pricing summary first (core subtotals, markup, taxes, final total).
+2. Keep detailed pricing controls in an expandable section (progressive disclosure).
+3. Treat each adjustment row as a whole-row primary interaction target for editing.
+4. Keep secondary adjustment actions in one ellipsis menu (enable/disable, duplicate, delete).
+5. Confirm destructive adjustment deletion.
+6. Surface incomplete pricing explicitly; do not hide zero-value or incomplete assemblies.
+7. Distinguish cost, markup, tax, and final selling total with clear labels.
+8. Show clear tax explanations describing what PST and GST are currently applied to.
+9. Include loading, saving, saved, validation, and error states in pricing controls.
+
 ## Current-Code Notes
 
 1. Current implementation uses mostly inline styles, with some global CSS tokens.

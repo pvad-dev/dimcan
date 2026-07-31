@@ -2,6 +2,17 @@ import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { normalizeAssemblies } from "../../../../lib/assembly-estimating";
+import {
+  buildProjectPricingSummary,
+  createDefaultPricingSettings,
+  normalizePricingAdjustments,
+  normalizePricingSettings,
+  normalizePricingSummary,
+  type PricingAdjustment,
+  type PricingSettings,
+  type PricingSummary,
+} from "../../../../lib/project-pricing";
 import {
   defaultTakeoffSettings,
   normalizeTakeoffGroups,
@@ -38,6 +49,8 @@ const ACTIVITY_TYPES = [
   "takeoff-deleted",
   "takeoff-linked",
   "takeoff-unlinked",
+  "pricing-settings-updated",
+  "pricing-adjustment-updated",
   "project-archived",
   "project-restored",
   "update",
@@ -81,6 +94,9 @@ type ProjectData = {
   takeoffItems: TakeoffItem[];
   takeoffGroups: TakeoffGroup[];
   takeoffSettings: TakeoffSettings;
+  pricingSettings: PricingSettings;
+  pricingAdjustments: PricingAdjustment[];
+  pricingSummary: PricingSummary;
   understandingOverrides: Record<string, unknown>;
   attributionData: Record<string, "AI" | "User">;
   updatedAt: string;
@@ -94,6 +110,9 @@ type ProjectPatch = Partial<{
   takeoffItems: TakeoffItem[];
   takeoffGroups: TakeoffGroup[];
   takeoffSettings: TakeoffSettings;
+  pricingSettings: PricingSettings;
+  pricingAdjustments: PricingAdjustment[];
+  pricingSummary: PricingSummary;
   understandingOverrides: Record<string, unknown>;
   attributionData: Record<string, "AI" | "User">;
 }>;
@@ -248,6 +267,14 @@ function createDefaultProjectData(projectName: string): ProjectData {
   const takeoffSettings = defaultTakeoffSettings();
   const takeoffItems = normalizeTakeoffItems([], takeoffSettings);
   const takeoffGroups = syncTakeoffGroupsWithItems(takeoffItems, []);
+  const pricingSettings = createDefaultPricingSettings();
+  const pricingAdjustments = normalizePricingAdjustments([]);
+  const pricingSummary = buildProjectPricingSummary({
+    assemblies: [],
+    takeoffItems,
+    pricingSettings,
+    pricingAdjustments,
+  });
 
   return {
     schemaVersion: PROJECT_SCHEMA_VERSION,
@@ -258,6 +285,9 @@ function createDefaultProjectData(projectName: string): ProjectData {
     takeoffItems,
     takeoffGroups,
     takeoffSettings,
+    pricingSettings,
+    pricingAdjustments,
+    pricingSummary,
     understandingOverrides: {},
     attributionData: {},
     updatedAt: new Date().toISOString(),
@@ -272,6 +302,18 @@ function normalizeProjectData(raw: unknown, projectName: string): ProjectData {
     takeoffItems,
     normalizeTakeoffGroups(source.takeoffGroups),
   );
+  const pricingSettings = normalizePricingSettings(source.pricingSettings);
+  const pricingAdjustments = normalizePricingAdjustments(source.pricingAdjustments);
+  const normalizedAssemblies = Array.isArray(source.assemblies) ? source.assemblies : [];
+  const normalizedAssemblyRecords = normalizeAssemblies(normalizedAssemblies);
+  const pricingSummary = source.pricingSummary
+    ? normalizePricingSummary(source.pricingSummary)
+    : buildProjectPricingSummary({
+        assemblies: normalizedAssemblyRecords,
+        takeoffItems,
+        pricingSettings,
+        pricingAdjustments,
+      });
 
   const migratedNotes = (() => {
     if (Array.isArray(source.notes)) {
@@ -334,10 +376,13 @@ function normalizeProjectData(raw: unknown, projectName: string): ProjectData {
         : projectName,
     notes: migratedNotes,
     activity: dedupeActivity(migratedActivity),
-    assemblies: Array.isArray(source.assemblies) ? source.assemblies : [],
+    assemblies: normalizedAssemblies,
     takeoffItems,
     takeoffGroups,
     takeoffSettings,
+    pricingSettings,
+    pricingAdjustments,
+    pricingSummary,
     understandingOverrides:
       source.understandingOverrides && typeof source.understandingOverrides === "object"
         ? (source.understandingOverrides as Record<string, unknown>)
@@ -365,6 +410,7 @@ function isProjectDataEffectivelyEmpty(project: ProjectData, projectName: string
     project.activity.length === 0 &&
     project.assemblies.length === 0 &&
     project.takeoffItems.length === 0 &&
+    project.pricingAdjustments.length === 0 &&
     Object.keys(project.understandingOverrides).length === 0 &&
     Object.keys(project.attributionData).length === 0
   );
@@ -434,6 +480,18 @@ function mergePatch(current: ProjectData, patch: ProjectPatch, projectName: stri
     next.takeoffSettings = normalizeTakeoffSettings(patch.takeoffSettings);
   }
 
+  if (patch.pricingSettings && typeof patch.pricingSettings === "object") {
+    next.pricingSettings = normalizePricingSettings(patch.pricingSettings);
+  }
+
+  if (Array.isArray(patch.pricingAdjustments)) {
+    next.pricingAdjustments = normalizePricingAdjustments(patch.pricingAdjustments);
+  }
+
+  if (patch.pricingSummary && typeof patch.pricingSummary === "object") {
+    next.pricingSummary = normalizePricingSummary(patch.pricingSummary);
+  }
+
   if (Array.isArray(patch.takeoffItems)) {
     next.takeoffItems = normalizeTakeoffItems(patch.takeoffItems, next.takeoffSettings);
   }
@@ -443,6 +501,13 @@ function mergePatch(current: ProjectData, patch: ProjectPatch, projectName: stri
   }
 
   next.takeoffGroups = syncTakeoffGroupsWithItems(next.takeoffItems, next.takeoffGroups);
+  const normalizedAssemblyRecords = normalizeAssemblies(next.assemblies);
+  next.pricingSummary = buildProjectPricingSummary({
+    assemblies: normalizedAssemblyRecords,
+    takeoffItems: next.takeoffItems,
+    pricingSettings: next.pricingSettings,
+    pricingAdjustments: next.pricingAdjustments,
+  });
 
   if (patch.understandingOverrides && typeof patch.understandingOverrides === "object") {
     next.understandingOverrides = patch.understandingOverrides;

@@ -4,7 +4,24 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AssembliesPanel from "./AssembliesPanel";
-import { cloneAssembly, normalizeAssemblies, type AssemblyLibraryTemplate, type ProjectAssemblyRecord } from "../../../lib/assembly-estimating";
+import { cloneAssembly, formatCurrency, normalizeAssemblies, type AssemblyLibraryTemplate, type ProjectAssemblyRecord } from "../../../lib/assembly-estimating";
+import {
+  PRICING_ADJUSTMENT_TYPES,
+  PRICING_TAX_BASES,
+  buildProjectPricingSummary,
+  createDefaultPricingAdjustment,
+  createDefaultPricingSettings,
+  duplicatePricingAdjustment,
+  normalizePricingAdjustments,
+  normalizePricingSettings,
+  normalizePricingSummary,
+  type PricingAdjustment,
+  type PricingAdjustmentAmountType,
+  type PricingAdjustmentType,
+  type PricingSettings,
+  type PricingSummary,
+  type PricingTaxBase,
+} from "../../../lib/project-pricing";
 import { recomputeProjectUnderstanding, type ProjectUnderstanding as PrototypeProjectUnderstanding } from "../../../lib/project-understanding";
 import {
   TAKEOFF_CATEGORIES,
@@ -77,6 +94,8 @@ type ActivityType =
   | "takeoff-deleted"
   | "takeoff-linked"
   | "takeoff-unlinked"
+  | "pricing-settings-updated"
+  | "pricing-adjustment-updated"
   | "project-archived"
   | "project-restored"
   | "update"
@@ -110,6 +129,9 @@ type PersistedProjectData = {
   takeoffItems: TakeoffItem[];
   takeoffGroups: TakeoffGroup[];
   takeoffSettings: TakeoffSettings;
+  pricingSettings: PricingSettings;
+  pricingAdjustments: PricingAdjustment[];
+  pricingSummary: PricingSummary;
   understandingOverrides: Partial<ProjectUnderstanding>;
   attributionData: Record<string, "AI" | "User">;
   updatedAt: string;
@@ -123,6 +145,9 @@ type ProjectDataPatch = Partial<{
   takeoffItems: TakeoffItem[];
   takeoffGroups: TakeoffGroup[];
   takeoffSettings: TakeoffSettings;
+  pricingSettings: PricingSettings;
+  pricingAdjustments: PricingAdjustment[];
+  pricingSummary: PricingSummary;
   understandingOverrides: Partial<ProjectUnderstanding>;
   attributionData: Record<string, "AI" | "User">;
 }>;
@@ -186,6 +211,9 @@ const activityTypeBadge = (type: ActivityType) => {
     case "takeoff-linked":
     case "takeoff-unlinked":
       return "Takeoff";
+    case "pricing-settings-updated":
+    case "pricing-adjustment-updated":
+      return "Pricing";
     case "decision":
       return "Decision";
     case "project-understanding-updated":
@@ -231,6 +259,9 @@ const activityTypeIcon = (type: ActivityType) => {
       return "↔";
     case "takeoff-unlinked":
       return "⇄";
+    case "pricing-settings-updated":
+    case "pricing-adjustment-updated":
+      return "$";
     default:
       return "•";
   }
@@ -274,6 +305,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   const takeoffItemsStorageKey = `dimcan:projectTakeoffItems:${projectName}`;
   const takeoffGroupsStorageKey = `dimcan:projectTakeoffGroups:${projectName}`;
   const takeoffSettingsStorageKey = `dimcan:projectTakeoffSettings:${projectName}`;
+  const pricingSettingsStorageKey = `dimcan:projectPricingSettings:${projectName}`;
+  const pricingAdjustmentsStorageKey = `dimcan:projectPricingAdjustments:${projectName}`;
+  const pricingSummaryStorageKey = `dimcan:projectPricingSummary:${projectName}`;
   const migrationKey = `dimcan:projectMigrated:${projectName}`;
 
   const [projectTitle, setProjectTitle] = useState(projectName);
@@ -336,6 +370,25 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   const [takeoffValidationError, setTakeoffValidationError] = useState<string | null>(null);
   const [takeoffUiMessage, setTakeoffUiMessage] = useState<string | null>(null);
   const [takeoffExpandedItemId, setTakeoffExpandedItemId] = useState<string | null>(null);
+  const [pricingSettings, setPricingSettings] = useState<PricingSettings>(createDefaultPricingSettings());
+  const [pricingAdjustments, setPricingAdjustments] = useState<PricingAdjustment[]>([]);
+  const [persistedPricingSummary, setPersistedPricingSummary] = useState<PricingSummary>(
+    buildProjectPricingSummary({
+      assemblies: [],
+      takeoffItems: [],
+      pricingSettings: createDefaultPricingSettings(),
+      pricingAdjustments: [],
+    }),
+  );
+  const [pricingExpanded, setPricingExpanded] = useState(false);
+  const [pricingError, setPricingError] = useState<string | null>(null);
+  const [pricingMessage, setPricingMessage] = useState<string | null>(null);
+  const [openPricingAdjustmentMenuId, setOpenPricingAdjustmentMenuId] = useState<string | null>(null);
+  const [editingAdjustmentId, setEditingAdjustmentId] = useState<string | null>(null);
+  const [isPricingAdjustmentEditorOpen, setIsPricingAdjustmentEditorOpen] = useState(false);
+  const [pricingAdjustmentDraft, setPricingAdjustmentDraft] = useState<PricingAdjustment>(createDefaultPricingAdjustment());
+  const pricingMessageTimerRef = useRef<number | null>(null);
+  const pricingRateFocusRef = useRef<{ pstRate: number; gstRate: number } | null>(null);
   const [isProjectDataLoading, setIsProjectDataLoading] = useState(true);
   const assemblySaveTimerRef = useRef<number | null>(null);
   const takeoffSaveTimerRef = useRef<number | null>(null);
@@ -528,6 +581,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
       [`dimcan:projectTakeoffItems:${fromName}`, `dimcan:projectTakeoffItems:${toName}`],
       [`dimcan:projectTakeoffGroups:${fromName}`, `dimcan:projectTakeoffGroups:${toName}`],
       [`dimcan:projectTakeoffSettings:${fromName}`, `dimcan:projectTakeoffSettings:${toName}`],
+      [`dimcan:projectPricingSettings:${fromName}`, `dimcan:projectPricingSettings:${toName}`],
+      [`dimcan:projectPricingAdjustments:${fromName}`, `dimcan:projectPricingAdjustments:${toName}`],
+      [`dimcan:projectPricingSummary:${fromName}`, `dimcan:projectPricingSummary:${toName}`],
       [`dimcan:projectMigrated:${fromName}`, `dimcan:projectMigrated:${toName}`],
     ];
 
@@ -555,6 +611,15 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     const localTakeoffGroups = syncTakeoffGroupsWithItems(
       localTakeoffItems,
       normalizeTakeoffGroups(localTakeoffGroupsRaw),
+    );
+    const localPricingSettings = normalizePricingSettings(
+      readStorageValue<unknown>(pricingSettingsStorageKey, createDefaultPricingSettings()),
+    );
+    const localPricingAdjustments = normalizePricingAdjustments(
+      readStorageValue<unknown[]>(pricingAdjustmentsStorageKey, []),
+    );
+    const localPricingSummary = normalizePricingSummary(
+      readStorageValue<unknown>(pricingSummaryStorageKey, null),
     );
     const localUnderstanding = readStorageValue<Partial<ProjectUnderstanding>>(storageKey, {});
     const localAttribution = readStorageValue<Record<string, "AI" | "User">>(attrStorageKey, {});
@@ -597,6 +662,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
       takeoffItems: localTakeoffItems,
       takeoffGroups: localTakeoffGroups,
       takeoffSettings: localTakeoffSettings,
+      pricingSettings: localPricingSettings,
+      pricingAdjustments: localPricingAdjustments,
+      pricingSummary: localPricingSummary,
       understandingOverrides: localUnderstanding,
       attributionData: localAttribution,
     };
@@ -608,6 +676,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
           normalizedLocalActivity.length > 0 ||
           localAssemblies.length > 0 ||
           localTakeoffItems.length > 0 ||
+          localPricingAdjustments.length > 0 ||
           Object.keys(localUnderstanding).length > 0 ||
           Object.keys(localAttribution).length > 0;
 
@@ -620,6 +689,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     assemblyStorageKey,
     attrStorageKey,
     notesStorageKey,
+    pricingAdjustmentsStorageKey,
+    pricingSettingsStorageKey,
+    pricingSummaryStorageKey,
     projectName,
     storageKey,
     takeoffGroupsStorageKey,
@@ -641,6 +713,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     setTakeoffSettings(normalizedTakeoffSettings);
     setTakeoffItems(normalizedTakeoffItems);
     setTakeoffGroups(syncTakeoffGroupsWithItems(normalizedTakeoffItems, normalizeTakeoffGroups(project.takeoffGroups)));
+    setPricingSettings(normalizePricingSettings(project.pricingSettings));
+    setPricingAdjustments(normalizePricingAdjustments(project.pricingAdjustments));
+    setPersistedPricingSummary(normalizePricingSummary(project.pricingSummary));
     setUserUnderstanding(
       project.understandingOverrides && typeof project.understandingOverrides === "object"
         ? project.understandingOverrides
@@ -723,6 +798,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
         ...effectiveProject,
         assemblies: normalizeAssemblies(effectiveProject.assemblies),
         takeoffSettings: normalizeTakeoffSettings(effectiveProject.takeoffSettings),
+        pricingSettings: normalizePricingSettings(effectiveProject.pricingSettings),
+        pricingAdjustments: normalizePricingAdjustments(effectiveProject.pricingAdjustments),
+        pricingSummary: normalizePricingSummary(effectiveProject.pricingSummary),
       };
       const normalizedTakeoffItems = normalizeTakeoffItems(
         effectiveProject.takeoffItems,
@@ -744,6 +822,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
       writeStorageValue(takeoffItemsStorageKey, normalizedProject.takeoffItems);
       writeStorageValue(takeoffGroupsStorageKey, normalizedProject.takeoffGroups);
       writeStorageValue(takeoffSettingsStorageKey, normalizedProject.takeoffSettings);
+      writeStorageValue(pricingSettingsStorageKey, normalizedProject.pricingSettings);
+      writeStorageValue(pricingAdjustmentsStorageKey, normalizedProject.pricingAdjustments);
+      writeStorageValue(pricingSummaryStorageKey, normalizedProject.pricingSummary);
       writeStorageValue(storageKey, normalizedProject.understandingOverrides);
       writeStorageValue(attrStorageKey, normalizedProject.attributionData);
     } catch {
@@ -757,6 +838,14 @@ export default function ProjectPageClient({ projectName }: { projectName: string
         takeoffItems: fallbackLocal.patch.takeoffItems || [],
         takeoffGroups: fallbackLocal.patch.takeoffGroups || [],
         takeoffSettings: fallbackLocal.patch.takeoffSettings || defaultTakeoffSettings(),
+        pricingSettings: fallbackLocal.patch.pricingSettings || createDefaultPricingSettings(),
+        pricingAdjustments: fallbackLocal.patch.pricingAdjustments || [],
+        pricingSummary: fallbackLocal.patch.pricingSummary || buildProjectPricingSummary({
+          assemblies: normalizeAssemblies(fallbackLocal.patch.assemblies || []),
+          takeoffItems: fallbackLocal.patch.takeoffItems || [],
+          pricingSettings: normalizePricingSettings(fallbackLocal.patch.pricingSettings || createDefaultPricingSettings()),
+          pricingAdjustments: normalizePricingAdjustments(fallbackLocal.patch.pricingAdjustments || []),
+        }),
         understandingOverrides: fallbackLocal.patch.understandingOverrides || {},
         attributionData: fallbackLocal.patch.attributionData || {},
         updatedAt: new Date().toISOString(),
@@ -773,6 +862,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     getLocalFallbackProjectData,
     migrationKey,
     notesStorageKey,
+    pricingAdjustmentsStorageKey,
+    pricingSettingsStorageKey,
+    pricingSummaryStorageKey,
     projectName,
     storageKey,
     takeoffGroupsStorageKey,
@@ -1427,6 +1519,261 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     openProjectFile(file, "preview", false);
   };
 
+  const computedPricingSummary = useMemo(() => {
+    return buildProjectPricingSummary({
+      assemblies: assembliesState,
+      takeoffItems,
+      pricingSettings,
+      pricingAdjustments,
+    });
+  }, [assembliesState, pricingAdjustments, pricingSettings, takeoffItems]);
+
+  const setPricingMessageWithTimeout = useCallback((message: string | null) => {
+    setPricingMessage(message);
+    if (pricingMessageTimerRef.current) {
+      window.clearTimeout(pricingMessageTimerRef.current);
+      pricingMessageTimerRef.current = null;
+    }
+    if (message) {
+      pricingMessageTimerRef.current = window.setTimeout(() => {
+        setPricingMessage(null);
+        pricingMessageTimerRef.current = null;
+      }, 1800) as unknown as number;
+    }
+  }, []);
+
+  const persistPricingData = useCallback(async (
+    nextSettings: PricingSettings,
+    nextAdjustments: PricingAdjustment[],
+    options?: {
+      message?: string;
+      activity?: {
+        type: "pricing-settings-updated" | "pricing-adjustment-updated";
+        title: string;
+        description: string;
+        metadata: Record<string, unknown>;
+      };
+    },
+  ) => {
+    const normalizedSettings = normalizePricingSettings(nextSettings);
+    const normalizedAdjustments = normalizePricingAdjustments(nextAdjustments);
+    const summary = buildProjectPricingSummary({
+      assemblies: assembliesState,
+      takeoffItems,
+      pricingSettings: normalizedSettings,
+      pricingAdjustments: normalizedAdjustments,
+    });
+
+    setPricingSettings(normalizedSettings);
+    setPricingAdjustments(normalizedAdjustments);
+    setPersistedPricingSummary(summary);
+
+    writeStorageValue(pricingSettingsStorageKey, normalizedSettings);
+    writeStorageValue(pricingAdjustmentsStorageKey, normalizedAdjustments);
+    writeStorageValue(pricingSummaryStorageKey, summary);
+
+    const success = await saveProjectPatch({
+      pricingSettings: normalizedSettings,
+      pricingAdjustments: normalizedAdjustments,
+      pricingSummary: summary,
+    });
+
+    if (!success) {
+      setPricingError("Could not save pricing updates. Please retry.");
+      return;
+    }
+
+    setPricingError(null);
+    if (options?.message) {
+      setPricingMessageWithTimeout(options.message);
+    }
+
+    if (options?.activity) {
+      appendActivity({
+        type: options.activity.type,
+        title: options.activity.title,
+        description: options.activity.description,
+        source: "user",
+        relatedFile: null,
+        relatedFolder: null,
+        metadata: options.activity.metadata,
+      });
+    }
+  }, [
+    appendActivity,
+    assembliesState,
+    pricingAdjustmentsStorageKey,
+    pricingSettingsStorageKey,
+    pricingSummaryStorageKey,
+    saveProjectPatch,
+    setPricingMessageWithTimeout,
+    takeoffItems,
+  ]);
+
+  const updatePricingSettings = useCallback((patch: Partial<PricingSettings>, logActivity = false) => {
+    const nextSettings = normalizePricingSettings({ ...pricingSettings, ...patch });
+    if (JSON.stringify(nextSettings) === JSON.stringify(pricingSettings)) {
+      return;
+    }
+    void persistPricingData(nextSettings, pricingAdjustments, {
+      message: "Pricing settings saved.",
+      activity: logActivity
+        ? {
+            type: "pricing-settings-updated",
+            title: "Pricing settings updated",
+            description: "Project-level tax and pricing settings were updated.",
+            metadata: {
+              pstEnabled: nextSettings.pstEnabled,
+              gstEnabled: nextSettings.gstEnabled,
+              pstRate: nextSettings.pstRate,
+              gstRate: nextSettings.gstRate,
+            },
+          }
+        : undefined,
+    });
+  }, [persistPricingData, pricingAdjustments, pricingSettings]);
+
+  const logPricingSettingsActivity = useCallback((description: string, metadata: Record<string, unknown>) => {
+    appendActivity({
+      type: "pricing-settings-updated",
+      title: "Pricing settings updated",
+      description,
+      source: "user",
+      relatedFile: null,
+      relatedFolder: null,
+      metadata,
+    });
+  }, [appendActivity]);
+
+  const openCreatePricingAdjustment = () => {
+    setEditingAdjustmentId(null);
+    setPricingAdjustmentDraft(createDefaultPricingAdjustment());
+    setIsPricingAdjustmentEditorOpen(true);
+    setPricingError(null);
+  };
+
+  const openEditPricingAdjustment = (adjustmentId: string) => {
+    const existing = pricingAdjustments.find((entry) => entry.id === adjustmentId);
+    if (!existing) {
+      return;
+    }
+    setEditingAdjustmentId(adjustmentId);
+    setPricingAdjustmentDraft(existing);
+    setIsPricingAdjustmentEditorOpen(true);
+    setPricingError(null);
+    setOpenPricingAdjustmentMenuId(null);
+  };
+
+  const closePricingAdjustmentEditor = () => {
+    setIsPricingAdjustmentEditorOpen(false);
+    setEditingAdjustmentId(null);
+    setPricingAdjustmentDraft(createDefaultPricingAdjustment());
+  };
+
+  const savePricingAdjustmentDraft = async () => {
+    const name = pricingAdjustmentDraft.name.trim();
+    if (!name) {
+      setPricingError("Adjustment name is required.");
+      return;
+    }
+
+    const normalizedDraft: PricingAdjustment = {
+      ...pricingAdjustmentDraft,
+      name,
+      value: Math.max(0, Number.isFinite(pricingAdjustmentDraft.value) ? pricingAdjustmentDraft.value : 0),
+      notes: pricingAdjustmentDraft.notes.trim(),
+    };
+
+    const nextAdjustments = editingAdjustmentId
+      ? pricingAdjustments.map((entry) => entry.id === editingAdjustmentId ? normalizedDraft : entry)
+      : [normalizedDraft, ...pricingAdjustments];
+
+    await persistPricingData(pricingSettings, nextAdjustments, {
+      message: editingAdjustmentId ? "Adjustment saved." : "Adjustment added.",
+      activity: {
+        type: "pricing-adjustment-updated",
+        title: editingAdjustmentId ? "Pricing adjustment updated" : "Pricing adjustment added",
+        description: `${normalizedDraft.name} ${editingAdjustmentId ? "was updated" : "was added"}.`,
+        metadata: {
+          adjustmentId: normalizedDraft.id,
+          type: normalizedDraft.type,
+          amountType: normalizedDraft.amountType,
+          value: normalizedDraft.value,
+        },
+      },
+    });
+
+    setPricingError(null);
+    closePricingAdjustmentEditor();
+  };
+
+  const togglePricingAdjustmentEnabled = async (adjustmentId: string) => {
+    const existing = pricingAdjustments.find((entry) => entry.id === adjustmentId);
+    if (!existing) {
+      return;
+    }
+
+    const nextAdjustments = pricingAdjustments.map((entry) => (
+      entry.id === adjustmentId ? { ...entry, enabled: !entry.enabled } : entry
+    ));
+
+    await persistPricingData(pricingSettings, nextAdjustments, {
+      message: existing.enabled ? "Adjustment disabled." : "Adjustment enabled.",
+      activity: {
+        type: "pricing-adjustment-updated",
+        title: "Pricing adjustment toggled",
+        description: `${existing.name} was ${existing.enabled ? "disabled" : "enabled"}.`,
+        metadata: { adjustmentId: existing.id, enabled: !existing.enabled },
+      },
+    });
+  };
+
+  const duplicatePricingAdjustmentById = async (adjustmentId: string) => {
+    const existing = pricingAdjustments.find((entry) => entry.id === adjustmentId);
+    if (!existing) {
+      return;
+    }
+
+    const duplicated = duplicatePricingAdjustment(existing);
+    const nextAdjustments = [duplicated, ...pricingAdjustments];
+
+    await persistPricingData(pricingSettings, nextAdjustments, {
+      message: "Adjustment duplicated.",
+      activity: {
+        type: "pricing-adjustment-updated",
+        title: "Pricing adjustment duplicated",
+        description: `${existing.name} duplicated as ${duplicated.name}.`,
+        metadata: { sourceAdjustmentId: existing.id, duplicatedAdjustmentId: duplicated.id },
+      },
+    });
+
+    setOpenPricingAdjustmentMenuId(null);
+  };
+
+  const deletePricingAdjustmentById = async (adjustmentId: string) => {
+    const existing = pricingAdjustments.find((entry) => entry.id === adjustmentId);
+    if (!existing) {
+      return;
+    }
+
+    if (!window.confirm(`Delete pricing adjustment \"${existing.name}\"?`)) {
+      return;
+    }
+
+    const nextAdjustments = pricingAdjustments.filter((entry) => entry.id !== adjustmentId);
+    await persistPricingData(pricingSettings, nextAdjustments, {
+      message: "Adjustment deleted.",
+      activity: {
+        type: "pricing-adjustment-updated",
+        title: "Pricing adjustment deleted",
+        description: `${existing.name} was deleted.`,
+        metadata: { adjustmentId: existing.id },
+      },
+    });
+
+    setOpenPricingAdjustmentMenuId(null);
+  };
+
   // Title editing
   useEffect(() => {
     if (isEditingTitle) {
@@ -1601,6 +1948,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
       }
       if (takeoffSaveTimerRef.current) {
         window.clearTimeout(takeoffSaveTimerRef.current);
+      }
+      if (pricingMessageTimerRef.current) {
+        window.clearTimeout(pricingMessageTimerRef.current);
       }
       for (const timerId of Object.values(noteSaveTimersRef.current)) {
         window.clearTimeout(timerId);
@@ -2737,6 +3087,291 @@ export default function ProjectPageClient({ projectName }: { projectName: string
           onDeleteAssembly={deleteAssembly}
           onAutosaveAssemblyEdit={autosaveAssemblyEdit}
         />
+
+        <section style={{ marginBottom: 16, background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 12, padding: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Project Pricing</h2>
+              <div style={{ marginTop: 6, color: saveStatus === 'error' ? '#a1260d' : '#766b5d', fontSize: 12 }}>
+                {isProjectDataLoading ? 'Loading pricing...' : saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? 'Saved' : saveStatus === 'error' ? 'Could not save' : 'Pricing updates autosave'}
+              </div>
+            </div>
+            <button
+              onClick={() => setPricingExpanded((current) => !current)}
+              style={{ minHeight: 44, border: '1px solid #d8cdbc', background: '#fff', borderRadius: 8, padding: '10px 12px', cursor: 'pointer' }}
+            >
+              {pricingExpanded ? 'Hide breakdown' : 'Show breakdown'}
+            </button>
+          </div>
+
+          {pricingError && (
+            <div style={{ marginTop: 10, border: '1px solid #e4b6ac', background: '#fff0ed', color: '#7d2613', borderRadius: 8, padding: '10px 12px' }}>
+              {pricingError}
+            </div>
+          )}
+
+          {pricingMessage && (
+            <div style={{ marginTop: 10, border: '1px solid #c7dec8', background: '#eef9ef', color: '#2f6f42', borderRadius: 8, padding: '10px 12px' }}>
+              {pricingMessage}
+            </div>
+          )}
+
+          <div style={{ marginTop: 12, background: '#fff', border: '1px solid #e6dac8', borderRadius: 10, padding: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8 }}>
+              <div><div style={{ color: '#766b5d', fontSize: 12 }}>Labour</div><div style={{ fontWeight: 700 }}>{formatCurrency(computedPricingSummary.labourSubtotal)}</div></div>
+              <div><div style={{ color: '#766b5d', fontSize: 12 }}>Materials</div><div style={{ fontWeight: 700 }}>{formatCurrency(computedPricingSummary.materialSubtotal)}</div></div>
+              <div><div style={{ color: '#766b5d', fontSize: 12 }}>Equipment</div><div style={{ fontWeight: 700 }}>{formatCurrency(computedPricingSummary.equipmentSubtotal)}</div></div>
+              <div><div style={{ color: '#766b5d', fontSize: 12 }}>Subcontract</div><div style={{ fontWeight: 700 }}>{formatCurrency(computedPricingSummary.subcontractSubtotal)}</div></div>
+              <div><div style={{ color: '#766b5d', fontSize: 12 }}>Assembly markup</div><div style={{ fontWeight: 700 }}>{formatCurrency(computedPricingSummary.assemblyMarkup)}</div></div>
+              <div><div style={{ color: '#766b5d', fontSize: 12 }}>Adjustments</div><div style={{ fontWeight: 700 }}>{formatCurrency(computedPricingSummary.projectAdjustmentsTotal)}</div></div>
+              <div><div style={{ color: '#766b5d', fontSize: 12 }}>PST + GST</div><div style={{ fontWeight: 700 }}>{formatCurrency(computedPricingSummary.pst + computedPricingSummary.gst)}</div></div>
+              <div style={{ border: '1px solid #d8cdbc', borderRadius: 8, background: '#fbf4e9', padding: 8 }}>
+                <div style={{ color: '#594f43', fontSize: 12, fontWeight: 700 }}>Final project total</div>
+                <div style={{ fontWeight: 800, fontSize: 20, color: '#2f2a24' }}>{formatCurrency(computedPricingSummary.finalProjectTotal)}</div>
+              </div>
+            </div>
+            <div style={{ marginTop: 8, color: '#8b7f70', fontSize: 12 }}>
+              Last saved total: {formatCurrency(persistedPricingSummary.finalProjectTotal)}
+            </div>
+          </div>
+
+          {computedPricingSummary.hasIncompletePricing && (
+            <div style={{ marginTop: 10, border: '1px solid #e5c98f', background: '#fff6e5', color: '#6f5324', borderRadius: 8, padding: '10px 12px' }}>
+              Pricing is incomplete for {computedPricingSummary.incompleteAssemblies.length} assembl{computedPricingSummary.incompleteAssemblies.length === 1 ? 'y' : 'ies'}.
+              <div style={{ marginTop: 6, display: 'grid', gap: 4 }}>
+                {computedPricingSummary.incompleteAssemblies.map((item) => (
+                  <div key={item.assemblyId}>• {item.assemblyName}: {item.reasons.join(' ')}</div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {assembliesState.length === 0 && (
+            <div style={{ marginTop: 10, border: '1px dashed #d8cdbc', borderRadius: 8, padding: 12, color: '#766b5d' }}>
+              No assemblies yet. Add project assemblies to build pricing totals.
+            </div>
+          )}
+
+          {pricingExpanded && (
+            <div style={{ marginTop: 12, display: 'grid', gap: 12 }}>
+              <div style={{ border: '1px solid #e6dac8', borderRadius: 10, background: '#fff', padding: 10 }}>
+                <div style={{ fontWeight: 700, marginBottom: 8 }}>Tax settings</div>
+                <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 44 }}>
+                    <input
+                      type="checkbox"
+                      checked={pricingSettings.pstEnabled}
+                      onChange={(event) => updatePricingSettings({ pstEnabled: event.target.checked }, true)}
+                      style={{ width: 18, height: 18 }}
+                    />
+                    <span>Enable PST</span>
+                  </label>
+                  <label style={{ display: 'grid', gap: 6 }}>
+                    <span>PST rate %</span>
+                    <input
+                      value={pricingSettings.pstRate}
+                      onFocus={() => {
+                        pricingRateFocusRef.current = {
+                          pstRate: pricingSettings.pstRate,
+                          gstRate: pricingSettings.gstRate,
+                        };
+                      }}
+                      onChange={(event) => updatePricingSettings({ pstRate: Math.max(0, Number(event.target.value) || 0) })}
+                      onBlur={() => {
+                        const original = pricingRateFocusRef.current?.pstRate;
+                        if (typeof original === 'number' && Math.abs(original - pricingSettings.pstRate) > 0.0001) {
+                          logPricingSettingsActivity('PST rate was updated.', {
+                            field: 'pstRate',
+                            from: original,
+                            to: pricingSettings.pstRate,
+                          });
+                        }
+                      }}
+                      inputMode="decimal"
+                      style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px' }}
+                    />
+                  </label>
+                  <label style={{ display: 'grid', gap: 6 }}>
+                    <span>PST applies to</span>
+                    <select
+                      value={pricingSettings.pstAppliesTo}
+                      onChange={(event) => updatePricingSettings({ pstAppliesTo: event.target.value as PricingTaxBase }, true)}
+                      style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px', background: '#fff' }}
+                    >
+                      {PRICING_TAX_BASES.map((base) => <option key={`pst-${base}`} value={base}>{base}</option>)}
+                    </select>
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 44 }}>
+                    <input
+                      type="checkbox"
+                      checked={pricingSettings.gstEnabled}
+                      onChange={(event) => updatePricingSettings({ gstEnabled: event.target.checked }, true)}
+                      style={{ width: 18, height: 18 }}
+                    />
+                    <span>Enable GST</span>
+                  </label>
+                  <label style={{ display: 'grid', gap: 6 }}>
+                    <span>GST rate %</span>
+                    <input
+                      value={pricingSettings.gstRate}
+                      onFocus={() => {
+                        pricingRateFocusRef.current = {
+                          pstRate: pricingSettings.pstRate,
+                          gstRate: pricingSettings.gstRate,
+                        };
+                      }}
+                      onChange={(event) => updatePricingSettings({ gstRate: Math.max(0, Number(event.target.value) || 0) })}
+                      onBlur={() => {
+                        const original = pricingRateFocusRef.current?.gstRate;
+                        if (typeof original === 'number' && Math.abs(original - pricingSettings.gstRate) > 0.0001) {
+                          logPricingSettingsActivity('GST rate was updated.', {
+                            field: 'gstRate',
+                            from: original,
+                            to: pricingSettings.gstRate,
+                          });
+                        }
+                      }}
+                      inputMode="decimal"
+                      style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px' }}
+                    />
+                  </label>
+                  <label style={{ display: 'grid', gap: 6 }}>
+                    <span>GST applies to</span>
+                    <select
+                      value={pricingSettings.gstAppliesTo}
+                      onChange={(event) => updatePricingSettings({ gstAppliesTo: event.target.value as PricingTaxBase }, true)}
+                      style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px', background: '#fff' }}
+                    >
+                      {PRICING_TAX_BASES.map((base) => <option key={`gst-${base}`} value={base}>{base}</option>)}
+                    </select>
+                  </label>
+                  <label style={{ display: 'grid', gap: 6 }}>
+                    <span>Percent adjustment base</span>
+                    <select
+                      value={pricingSettings.adjustmentPercentBase}
+                      onChange={(event) => updatePricingSettings({ adjustmentPercentBase: event.target.value === 'costSubtotal' ? 'costSubtotal' : 'sellingSubtotal' }, true)}
+                      style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px', background: '#fff' }}
+                    >
+                      <option value="sellingSubtotal">sellingSubtotal</option>
+                      <option value="costSubtotal">costSubtotal</option>
+                    </select>
+                  </label>
+                </div>
+                <div style={{ marginTop: 8, color: '#766b5d', fontSize: 12 }}>
+                  {computedPricingSummary.taxExplanations.pst}
+                </div>
+                <div style={{ marginTop: 2, color: '#766b5d', fontSize: 12 }}>
+                  {computedPricingSummary.taxExplanations.gst}
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid #e6dac8', borderRadius: 10, background: '#fff', padding: 10 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <div style={{ fontWeight: 700 }}>Project adjustments</div>
+                  <button
+                    onClick={openCreatePricingAdjustment}
+                    style={{ minHeight: 44, border: 'none', background: '#594f43', color: '#fff', borderRadius: 8, padding: '10px 12px', cursor: 'pointer' }}
+                  >
+                    Add adjustment
+                  </button>
+                </div>
+
+                {isPricingAdjustmentEditorOpen ? (
+                  <div style={{ marginTop: 10, border: '1px solid #e6dac8', borderRadius: 8, background: '#fffaf2', padding: 10, display: 'grid', gap: 8 }}>
+                    <div style={{ fontWeight: 700 }}>{editingAdjustmentId ? 'Edit adjustment' : 'New adjustment'}</div>
+                    <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+                      <label style={{ display: 'grid', gap: 6 }}><span>Name</span><input value={pricingAdjustmentDraft.name} onChange={(event) => setPricingAdjustmentDraft((current) => ({ ...current, name: event.target.value }))} style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px' }} /></label>
+                      <label style={{ display: 'grid', gap: 6 }}><span>Type</span><select value={pricingAdjustmentDraft.type} onChange={(event) => setPricingAdjustmentDraft((current) => ({ ...current, type: event.target.value as PricingAdjustmentType }))} style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px', background: '#fff' }}>{PRICING_ADJUSTMENT_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}</select></label>
+                      <label style={{ display: 'grid', gap: 6 }}><span>Amount type</span><select value={pricingAdjustmentDraft.amountType} onChange={(event) => setPricingAdjustmentDraft((current) => ({ ...current, amountType: event.target.value as PricingAdjustmentAmountType }))} style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px', background: '#fff' }}><option value="fixed">fixed</option><option value="percent">percent</option></select></label>
+                      <label style={{ display: 'grid', gap: 6 }}><span>Value</span><input value={pricingAdjustmentDraft.value} onChange={(event) => setPricingAdjustmentDraft((current) => ({ ...current, value: Math.max(0, Number(event.target.value) || 0) }))} inputMode="decimal" style={{ minHeight: 44, borderRadius: 8, border: '1px solid #d8cdbc', padding: '10px 12px' }} /></label>
+                    </div>
+                    <label style={{ display: 'grid', gap: 6 }}>
+                      <span>Notes</span>
+                      <textarea value={pricingAdjustmentDraft.notes} onChange={(event) => setPricingAdjustmentDraft((current) => ({ ...current, notes: event.target.value }))} style={{ minHeight: 70, borderRadius: 8, border: '1px solid #d8cdbc', padding: 10 }} />
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 44 }}>
+                      <input type="checkbox" checked={pricingAdjustmentDraft.enabled} onChange={(event) => setPricingAdjustmentDraft((current) => ({ ...current, enabled: event.target.checked }))} style={{ width: 18, height: 18 }} />
+                      <span>Enabled</span>
+                    </label>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                      <button onClick={closePricingAdjustmentEditor} style={{ minHeight: 44, border: '1px solid #d8cdbc', background: '#fff', borderRadius: 8, padding: '10px 12px', cursor: 'pointer' }}>Cancel</button>
+                      <button onClick={() => { void savePricingAdjustmentDraft(); }} style={{ minHeight: 44, border: 'none', background: '#594f43', color: '#fff', borderRadius: 8, padding: '10px 12px', cursor: 'pointer' }}>{editingAdjustmentId ? 'Save adjustment' : 'Add adjustment'}</button>
+                    </div>
+                  </div>
+                ) : null}
+
+                <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
+                  {pricingAdjustments.length === 0 ? (
+                    <div style={{ border: '1px dashed #d8cdbc', borderRadius: 8, padding: 10, color: '#766b5d' }}>No adjustments added yet.</div>
+                  ) : (
+                    pricingAdjustments.map((adjustment) => {
+                      const applied = computedPricingSummary.projectAdjustments.find((entry) => entry.id === adjustment.id);
+                      return (
+                        <div
+                          key={adjustment.id}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => openEditPricingAdjustment(adjustment.id)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              openEditPricingAdjustment(adjustment.id);
+                            }
+                          }}
+                          style={{ border: '1px solid #e6dac8', borderRadius: 10, background: adjustment.enabled ? '#fff' : '#faf6ef', padding: 10, display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', cursor: 'pointer' }}
+                        >
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontWeight: 700 }}>{adjustment.name}</div>
+                            <div style={{ marginTop: 4, color: '#766b5d', fontSize: 12 }}>
+                              {adjustment.type} • {adjustment.amountType} {adjustment.value}{adjustment.amountType === 'percent' ? '%' : ''} • {adjustment.enabled ? 'enabled' : 'disabled'}
+                            </div>
+                            {adjustment.notes && <div style={{ marginTop: 4, color: '#8b7f70', fontSize: 12 }}>{adjustment.notes}</div>}
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <div style={{ fontWeight: 700 }}>{formatCurrency(applied?.amount ?? 0)}</div>
+                            <div style={{ position: 'relative' }}>
+                              <button
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  setOpenPricingAdjustmentMenuId((current) => current === adjustment.id ? null : adjustment.id);
+                                }}
+                                style={{ width: 44, height: 44, border: '1px solid #d8cdbc', background: '#fffaf2', borderRadius: 8, cursor: 'pointer' }}
+                                aria-label={`Adjustment options for ${adjustment.name}`}
+                              >
+                                ⋯
+                              </button>
+                              {openPricingAdjustmentMenuId === adjustment.id && (
+                                <div style={{ position: 'absolute', right: 0, top: 46, zIndex: 20, minWidth: 180, border: '1px solid #d8cdbc', borderRadius: 10, background: '#fffaf2', boxShadow: '0 10px 20px rgba(47,42,36,0.12)', padding: 6, display: 'grid', gap: 4 }}>
+                                  <button onClick={(event) => { event.preventDefault(); event.stopPropagation(); openEditPricingAdjustment(adjustment.id); }} style={{ textAlign: 'left', border: 'none', background: 'transparent', minHeight: 44, padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>Edit</button>
+                                  <button onClick={(event) => { event.preventDefault(); event.stopPropagation(); void togglePricingAdjustmentEnabled(adjustment.id); }} style={{ textAlign: 'left', border: 'none', background: 'transparent', minHeight: 44, padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>{adjustment.enabled ? 'Disable' : 'Enable'}</button>
+                                  <button onClick={(event) => { event.preventDefault(); event.stopPropagation(); void duplicatePricingAdjustmentById(adjustment.id); }} style={{ textAlign: 'left', border: 'none', background: 'transparent', minHeight: 44, padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>Duplicate</button>
+                                  <button onClick={(event) => { event.preventDefault(); event.stopPropagation(); void deletePricingAdjustmentById(adjustment.id); }} style={{ textAlign: 'left', border: 'none', background: 'transparent', color: '#a1260d', minHeight: 44, padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}>Delete</button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid #e6dac8', borderRadius: 10, background: '#fff', padding: 10, display: 'grid', gap: 6 }}>
+                <div style={{ fontWeight: 700 }}>Pricing breakdown</div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}><span>Cost subtotal</span><strong>{formatCurrency(computedPricingSummary.costSubtotal)}</strong></div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}><span>Assembly markup</span><strong>{formatCurrency(computedPricingSummary.assemblyMarkup)}</strong></div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}><span>Selling subtotal</span><strong>{formatCurrency(computedPricingSummary.sellingSubtotal)}</strong></div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}><span>Project adjustments</span><strong>{formatCurrency(computedPricingSummary.projectAdjustmentsTotal)}</strong></div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}><span>Pre-tax subtotal</span><strong>{formatCurrency(computedPricingSummary.preTaxSubtotal)}</strong></div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}><span>PST</span><strong>{formatCurrency(computedPricingSummary.pst)}</strong></div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}><span>GST</span><strong>{formatCurrency(computedPricingSummary.gst)}</strong></div>
+                <div style={{ marginTop: 4, borderTop: '1px solid #ece0d1', paddingTop: 8, display: 'flex', justifyContent: 'space-between', gap: 12 }}><span style={{ fontWeight: 700 }}>Final project total</span><strong style={{ fontSize: 18 }}>{formatCurrency(computedPricingSummary.finalProjectTotal)}</strong></div>
+              </div>
+            </div>
+          )}
+        </section>
 
         <section style={{ marginBottom: 16, background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 12, padding: 16 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>

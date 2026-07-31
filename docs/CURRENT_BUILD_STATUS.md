@@ -44,12 +44,22 @@ Status is based on repository code inspection at the time of writing.
    - Automatic activity entry when understanding overrides are reset to AI baseline
    - Automatic structured entries for file rename and file move
 10. Assemblies workflow:
-   - Add/remove assemblies
-   - Edit component statuses and fields
-11. Save state indicators:
+   - Create, edit, duplicate, and delete reusable assemblies
+   - Structured assembly model in project.json with labour, material, equipment, and subcontract line items
+   - Debounced autosave for assembly edits with shared project save-state indicator
+   - Centralized subtotal, waste, markup, and pre-tax total calculations
+   - Backward-compatible normalization of legacy assembly records
+   - Add from Library (multi-select import) in project Assemblies
+   - Save project assembly to Library with copy-or-replace conflict flow
+11. Assembly Library workflow:
+   - Shared reusable template storage in assembly-library.json at workspace root
+   - Create/edit/duplicate/archive/restore/delete templates
+   - Search and category filtering
+   - Accessible from Workspace and Project Assemblies
+12. Save state indicators:
    - Saving, Saved, Could not save
-12. Archive and restore activity logging from workspace API.
-13. Project rename hardening:
+13. Archive and restore activity logging from workspace API.
+14. Project rename hardening:
    - Workspace rename validates trimmed names and rejects invalid Windows characters, reserved names, trailing spaces/periods, empty names, and duplicate folders.
    - Path-boundary checks are enforced when constructing project folder paths.
    - Exact same-name rename returns success without calling filesystem rename.
@@ -78,6 +88,7 @@ Status is based on repository code inspection at the time of writing.
 4. File operations rely on local filesystem availability and permissions.
 5. Duplicate style logic across pages increases long-term maintenance cost.
 6. app/new-project/page.tsx appears disconnected from current primary creation flow.
+7. Tax handling in assemblies is configurable but currently informational; GST/PST is not yet fully computed in totals.
 
 ## Untested or Not Verified During This Documentation Task
 

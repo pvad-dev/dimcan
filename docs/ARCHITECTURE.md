@@ -77,6 +77,18 @@ Responsibilities:
 6. Move files across allowed folders with validation and no-overwrite behavior.
 7. Enforce allowed folders and path boundaries.
 
+### 4) Assembly library route
+
+Path: app/api/assembly-library/route.ts
+
+Responsibilities:
+
+1. Ensure shared assembly-library.json exists under workspace root.
+2. Read and normalize active and archived reusable templates.
+3. Create, edit, duplicate, archive, restore, and delete templates.
+4. Save project assemblies into library templates (copy or replace mode).
+5. Write library updates atomically using temp file + rename.
+
 ## Storage Paths and Folder Layout
 
 Workspace root is hard-coded in APIs:
@@ -93,6 +105,10 @@ Key folders:
 6. Standards
 7. AI Knowledge
 8. Archive
+
+Shared assembly library file:
+
+K:\RenovationPlatform\Dimcan Workspace\assembly-library.json
 
 Per-project file folders currently enforced:
 
@@ -116,7 +132,7 @@ Primary structure in app/api/projects/[projectName]/route.ts:
 2. displayTitle: string
 3. notes: ProjectNote[]
 4. activity: ActivityEntry[]
-5. assemblies: unknown[] (client currently uses ProjectAssembly[])
+5. assemblies: ProjectAssemblyRecord[]
 6. understandingOverrides: Record<string, unknown>
 7. attributionData: Record<string, "AI" | "User">
 8. updatedAt: string (ISO)
@@ -141,11 +157,48 @@ ActivityEntry:
 8. relatedFolder
 9. metadata
 
+AssemblyLibraryData:
+
+1. schemaVersion
+2. templates: AssemblyLibraryTemplate[]
+3. archivedTemplates: AssemblyLibraryTemplate[]
+4. updatedAt
+
+ProjectAssemblyRecord:
+
+1. id
+2. name
+3. category
+4. description
+5. quantity
+6. unit
+7. labourItems[]
+8. materialItems[]
+9. equipmentItems[]
+10. subcontractItems[]
+11. wastePercent
+12. markupPercent
+13. taxHandling
+14. notes
+15. createdAt
+16. updatedAt
+
+AssemblyLineItem:
+
+1. description
+2. quantity
+3. unit
+4. unitCost
+5. total
+6. source
+7. notes
+
 Migration behavior implemented:
 
 1. Legacy string notes migrate to a structured note.
 2. Legacy string[] activity migrates to structured entries.
 3. Activity is deduped and sorted newest-first.
+4. Legacy assembly template records are normalized into the structured assembly model.
 
 ## Security and Path Validation
 
@@ -170,6 +223,8 @@ Important scope note:
 2. Project folder lifecycle
 3. Project JSON persistence
 4. Validation and path safety
+5. Data-shape normalization for migration-safe project.json records
+6. Atomic persistence for shared assembly library file
 
 ### Browser (ProjectPageClient)
 
@@ -179,6 +234,8 @@ Important scope note:
 4. Optimistic UI updates and save status indicators
 5. Web Share / clipboard fallback behavior
 6. Automatic project-history entry creation for key user actions (file upload/delete/open/download/share/link copy, note lifecycle, manual updates, understanding changes)
+7. Assemblies management UI with reusable cost model, debounced autosave, and summary calculations
+8. Assembly Library page and project-level import/save bridge for reusable templates
 
 ## Current UI Patterns in Code
 

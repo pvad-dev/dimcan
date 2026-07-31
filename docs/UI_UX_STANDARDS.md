@@ -121,6 +121,15 @@ This document defines reusable interface standards for Dimcan Platform, grounded
 4. Align server contracts and client state shapes before introducing new modules.
 5. Introduce shared UI primitives when repetition grows, while preserving current behavior.
 
+## 16) Assemblies Estimating UX
+
+1. Show assembly cards with concise estimate signals first: category, quantity, labour/material subtotals, markup, and total.
+2. Keep secondary assembly actions in one ellipsis menu (edit, duplicate, delete).
+3. Use modal or panel editing for dense line-item workflows; keep touch-safe controls (minimum 44px).
+4. Include explicit empty, validation, save-state, and error messaging in assemblies workflows.
+5. Avoid activity noise: create one structured activity entry per create/duplicate/delete and one meaningful edit entry per edit session.
+6. Clearly label estimating assumptions (for example waste application and current tax handling approach).
+
 ## Current-Code Notes
 
 1. Current implementation uses mostly inline styles, with some global CSS tokens.

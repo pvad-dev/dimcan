@@ -287,6 +287,22 @@ export default function Home() {
 
           <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
             <Link
+              href="/assembly-library"
+              style={{
+                border: "1px solid #b8aa98",
+                borderRadius: "9px",
+                padding: "12px 18px",
+                background: "#fffaf2",
+                color: "#2f2a24",
+                textDecoration: "none",
+                fontSize: "15px",
+                fontWeight: 600,
+              }}
+            >
+              Assembly Library
+            </Link>
+
+            <Link
               href="/archive"
               style={{
                 border: "1px solid #b8aa98",

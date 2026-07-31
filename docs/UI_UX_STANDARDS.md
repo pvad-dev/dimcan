@@ -133,6 +133,8 @@ This document defines reusable interface standards for Dimcan Platform, grounded
 2. Overview is a decision dashboard, not a duplicate of each full workflow.
 3. Overview summaries show a useful total or status, missing information where relevant, and one clear destination action.
 4. Notes open in a focused sheet from Overview instead of occupying permanent page height.
+   - Focus the new-note field when the sheet opens.
+   - Save meaningful new-note drafts when the sheet is dismissed; never persist whitespace-only drafts.
 5. Full workflow stages use the available workspace width and progressively reveal dense controls.
 6. Activity shows a reasonable recent batch first, supports search/filtering, and loads more without deleting history.
 7. One assembly is selected or expanded at a time unless a future comparison mode is explicitly enabled.

@@ -38,6 +38,7 @@ Status is based on repository code inspection at the time of writing.
    - Automatic activity entries for file open/download/share/link-copy actions
 9. Notes and activity workflows:
    - Multi-note system with categories
+   - Notes sheet focuses new-note input on open and saves meaningful drafts on X, backdrop, Escape, or browser Back dismissal
    - Structured activity history with filters and day grouping
    - Manual activity entry creation
    - Activity item deletion with confirmation

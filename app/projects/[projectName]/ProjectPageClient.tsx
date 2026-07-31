@@ -362,6 +362,10 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   const noteSaveTimersRef = useRef<Record<string, number>>({});
   const [newNoteText, setNewNoteText] = useState("");
   const [newNoteCategory, setNewNoteCategory] = useState<NoteCategory>("General");
+  const newNoteInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const newNoteDraftRef = useRef("");
+  const newNoteCategoryRef = useRef<NoteCategory>("General");
+  const notesPanelHistoryRef = useRef(false);
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const noteEditOriginalRef = useRef<Record<string, string>>({});
   const [openNoteMenuId, setOpenNoteMenuId] = useState<string | null>(null);
@@ -2491,20 +2495,26 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     void saveProjectPatch({ notes: nextNotes });
   }, [notesStorageKey, saveProjectPatch]);
 
-  const addNote = () => {
-    const text = newNoteText.trim();
+  const saveNoteDraft = useCallback(() => {
+    const text = newNoteDraftRef.current.trim();
     if (!text) {
-      return;
+      return false;
     }
 
+    const category = newNoteCategoryRef.current;
     const now = new Date().toISOString();
     const newNote: ProjectNote = {
       id: makeId(),
       text,
-      category: newNoteCategory,
+      category,
       createdAt: now,
       updatedAt: now,
     };
+
+    newNoteDraftRef.current = "";
+    newNoteCategoryRef.current = "General";
+    setNewNoteText("");
+    setNewNoteCategory("General");
 
     setProjectNotes((current) => {
       const next = [newNote, ...current];
@@ -2519,12 +2529,57 @@ export default function ProjectPageClient({ projectName }: { projectName: string
       source: "user",
       relatedFile: null,
       relatedFolder: null,
-      metadata: { category: newNoteCategory, noteId: newNote.id },
+      metadata: { category, noteId: newNote.id },
     });
 
-    setNewNoteText("");
-    setNewNoteCategory("General");
+    return true;
+  }, [appendActivity, saveNotesSnapshot]);
+
+  const addNote = () => {
+    saveNoteDraft();
   };
+
+  const openNotesPanel = useCallback(() => {
+    if (isNotesPanelOpen) {
+      return;
+    }
+    window.history.pushState({ ...window.history.state, dimcanNotesPanel: true }, "", window.location.href);
+    notesPanelHistoryRef.current = true;
+    setIsNotesPanelOpen(true);
+  }, [isNotesPanelOpen]);
+
+  const closeNotesPanel = useCallback((fromHistory = false) => {
+    saveNoteDraft();
+    setIsNotesPanelOpen(false);
+
+    const ownsHistoryEntry = notesPanelHistoryRef.current && window.history.state?.dimcanNotesPanel;
+    notesPanelHistoryRef.current = false;
+    if (!fromHistory && ownsHistoryEntry) {
+      window.history.back();
+    }
+  }, [saveNoteDraft]);
+
+  useEffect(() => {
+    if (!isNotesPanelOpen) {
+      return;
+    }
+
+    const focusFrame = window.requestAnimationFrame(() => newNoteInputRef.current?.focus());
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeNotesPanel();
+      }
+    };
+    const handlePopState = () => closeNotesPanel(true);
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("popstate", handlePopState);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("popstate", handlePopState);
+    };
+  }, [closeNotesPanel, isNotesPanelOpen]);
 
   const beginNoteEdit = (note: ProjectNote) => {
     noteEditOriginalRef.current[note.id] = note.text;
@@ -2700,7 +2755,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
           <div className="project-overview">
             <div className="project-stage-heading">
               <div><p>Project at a glance</p><h2>Everything important, without the noise.</h2></div>
-              <button onClick={() => setIsNotesPanelOpen(true)}>Open notes</button>
+              <button onClick={openNotesPanel}>Open notes</button>
             </div>
             {isProjectDataLoading ? (
               <div className="project-skeleton-grid" aria-label="Loading project overview">{Array.from({ length: 6 }, (_, index) => <div key={index} />)}</div>
@@ -2708,7 +2763,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
               <>
                 <div className="project-overview__grid">
                   <button className="project-summary-card" onClick={() => navigateToStage("files")}><span>Files</span><strong>{projectFiles.length}</strong><small>{projectFiles.length ? `${fileFilterCounts.Drawings} drawings · ${fileFilterCounts.Photos} photos` : "Upload plans, photos, and documents"}</small><b>View files →</b></button>
-                  <button className="project-summary-card" onClick={() => setIsNotesPanelOpen(true)}><span>Notes</span><strong>{projectNotes.length}</strong><small>{projectNotes[0]?.text || "Capture a client request or site decision"}</small><b>Open notes →</b></button>
+                  <button className="project-summary-card" onClick={openNotesPanel}><span>Notes</span><strong>{projectNotes.length}</strong><small>{projectNotes[0]?.text || "Capture a client request or site decision"}</small><b>Open notes →</b></button>
                   <button className="project-summary-card" onClick={() => navigateToStage("takeoff")}><span>Takeoff</span><strong>{takeoffItems.length}</strong><small>{takeoffItems.length ? `${groupedTakeoffItems.length} measured locations` : "No measurements recorded yet"}</small><b>Open takeoff →</b></button>
                   <button className="project-summary-card" onClick={() => navigateToStage("assemblies")}><span>Assemblies</span><strong>{assembliesState.length}</strong><small>{assembliesState.length ? `${assembliesState.filter((item) => item.takeoffControl).length} linked to takeoff` : "Build reusable scope and costs"}</small><b>View assemblies →</b></button>
                   <button className="project-summary-card project-summary-card--pricing" onClick={() => navigateToStage("pricing")}><span>Pricing</span><strong>{formatCurrency(computedPricingSummary.finalProjectTotal)}</strong><small>{computedPricingSummary.hasIncompletePricing ? `${computedPricingSummary.incompleteAssemblies.length} assemblies need attention` : "Current estimated project total"}</small><b>Review pricing →</b></button>
@@ -2933,11 +2988,11 @@ export default function ProjectPageClient({ projectName }: { projectName: string
         )}
 
         {isNotesPanelOpen && (
-        <div className="project-sheet-backdrop" onMouseDown={() => setIsNotesPanelOpen(false)}>
+        <div className="project-sheet-backdrop" onMouseDown={() => closeNotesPanel()}>
         <section className="project-sheet" onMouseDown={(event) => event.stopPropagation()}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Project Notes</h2>
-            <button className="project-sheet__close" onClick={() => setIsNotesPanelOpen(false)} aria-label="Close notes">×</button>
+            <button className="project-sheet__close" onClick={() => closeNotesPanel()} aria-label="Close notes">×</button>
             <div style={{ color: saveStatus === 'error' ? '#a1260d' : '#9a8f80', fontSize: 12 }}>
               {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? 'Saved' : saveStatus === 'error' ? 'Could not save' : '\u00a0'}
             </div>
@@ -2945,15 +3000,23 @@ export default function ProjectPageClient({ projectName }: { projectName: string
 
           <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
             <textarea
+              ref={newNoteInputRef}
               value={newNoteText}
-              onChange={(event) => setNewNoteText(event.target.value)}
+              onChange={(event) => {
+                newNoteDraftRef.current = event.target.value;
+                setNewNoteText(event.target.value);
+              }}
               placeholder="Add a project note, client request, site observation, or decision..."
               style={{ width: '100%', minHeight: 88, padding: 12, borderRadius: 8, border: '1px solid #d8cdbc', boxSizing: 'border-box' }}
             />
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
               <select
                 value={newNoteCategory}
-                onChange={(event) => setNewNoteCategory(event.target.value as NoteCategory)}
+                onChange={(event) => {
+                  const category = event.target.value as NoteCategory;
+                  newNoteCategoryRef.current = category;
+                  setNewNoteCategory(category);
+                }}
                 style={{ border: '1px solid #d8cdbc', background: '#fff', padding: '10px 12px', borderRadius: 8, minHeight: 44 }}
               >
                 {NOTE_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}

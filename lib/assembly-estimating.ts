@@ -318,7 +318,18 @@ export const calculateAssemblyTotals = (assembly: ProjectAssemblyRecord): Assemb
   };
 };
 
-export const applyAssemblyCalculations = (assembly: ProjectAssemblyRecord): ProjectAssemblyRecord => {
+export const applyAssemblyCalculations = (
+  assembly: ProjectAssemblyRecord,
+  options: { preserveDraftText?: boolean } = {},
+): ProjectAssemblyRecord => {
+  const normalizeText = options.preserveDraftText
+    ? (value: unknown, maxLength: number) => (
+        (typeof value === "string" ? value : "")
+          .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "")
+          .slice(0, maxLength)
+      )
+    : safeText;
+
   const normalizeItems = (items: AssemblyLineItem[]) => items.map((item) => {
     const quantity = nonNegative(item.quantity, 1);
     const unitCost = nonNegative(item.unitCost);
@@ -328,19 +339,19 @@ export const applyAssemblyCalculations = (assembly: ProjectAssemblyRecord): Proj
       unitCost,
       total: calculateLineItemTotal({ quantity, unitCost }),
       unit: validUnit(item.unit),
-      description: safeText(item.description, 500),
-      source: safeText(item.source, 200),
-      notes: safeText(item.notes, 2000),
+      description: normalizeText(item.description, 500),
+      source: normalizeText(item.source, 200),
+      notes: normalizeText(item.notes, 2000),
     };
   });
 
   return {
     ...assembly,
-    sourceTemplateId: safeText(assembly.sourceTemplateId, 120) || undefined,
+    sourceTemplateId: normalizeText(assembly.sourceTemplateId, 120) || undefined,
     takeoffControl: normalizeTakeoffControl(assembly.takeoffControl),
-    name: safeText(assembly.name, 200),
+    name: normalizeText(assembly.name, 200),
     category: validCategory(assembly.category),
-    description: safeText(assembly.description, 1000),
+    description: normalizeText(assembly.description, 1000),
     quantity: nonNegative(assembly.quantity, 1),
     unit: validUnit(assembly.unit),
     labourItems: normalizeItems(assembly.labourItems),
@@ -350,7 +361,7 @@ export const applyAssemblyCalculations = (assembly: ProjectAssemblyRecord): Proj
     wastePercent: nonNegative(assembly.wastePercent),
     markupPercent: nonNegative(assembly.markupPercent),
     taxHandling: validTaxHandling(assembly.taxHandling),
-    notes: safeText(assembly.notes, 3000),
+    notes: normalizeText(assembly.notes, 3000),
     createdAt: safeIso(assembly.createdAt),
     updatedAt: safeIso(assembly.updatedAt),
   };

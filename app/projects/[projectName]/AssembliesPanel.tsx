@@ -253,7 +253,7 @@ export default function AssembliesPanel({
         ...current,
         [field]: value,
         updatedAt: new Date().toISOString(),
-      });
+      }, { preserveDraftText: true });
     });
   };
 
@@ -264,7 +264,7 @@ export default function AssembliesPanel({
       return applyAssemblyCalculations({
         ...current,
         [bucket]: nextItems,
-      });
+      }, { preserveDraftText: true });
     });
   };
 
@@ -274,7 +274,7 @@ export default function AssembliesPanel({
       return applyAssemblyCalculations({
         ...current,
         [bucket]: current[bucket].filter((item) => item.id !== lineId),
-      });
+      }, { preserveDraftText: true });
     });
   };
 
@@ -285,7 +285,7 @@ export default function AssembliesPanel({
       return applyAssemblyCalculations({
         ...current,
         [bucket]: nextItems,
-      });
+      }, { preserveDraftText: true });
     });
   };
 

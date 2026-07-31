@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AssembliesPanel from "./AssembliesPanel";
+import "./project-workspace.css";
 import { cloneAssembly, formatCurrency, normalizeAssemblies, type AssemblyLibraryTemplate, type ProjectAssemblyRecord } from "../../../lib/assembly-estimating";
 import {
   PRICING_ADJUSTMENT_TYPES,
@@ -153,6 +154,20 @@ type ProjectDataPatch = Partial<{
 }>;
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
+type ProjectStage = "overview" | "files" | "takeoff" | "assemblies" | "pricing" | "activity";
+
+const PROJECT_STAGES: Array<{ id: ProjectStage; label: string }> = [
+  { id: "overview", label: "Overview" },
+  { id: "files", label: "Files" },
+  { id: "takeoff", label: "Takeoff" },
+  { id: "assemblies", label: "Assemblies" },
+  { id: "pricing", label: "Pricing" },
+  { id: "activity", label: "Activity" },
+];
+
+const isProjectStage = (value: string | null): value is ProjectStage => (
+  PROJECT_STAGES.some((stage) => stage.id === value)
+);
 
 type WorkspaceProjectActionResponse = {
   success: boolean;
@@ -390,6 +405,12 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   const pricingMessageTimerRef = useRef<number | null>(null);
   const pricingRateFocusRef = useRef<{ pstRate: number; gstRate: number } | null>(null);
   const [isProjectDataLoading, setIsProjectDataLoading] = useState(true);
+  const stageStorageKey = `dimcan:projectStage:${projectName}`;
+  const [activeStage, setActiveStage] = useState<ProjectStage>("overview");
+  const [isNotesPanelOpen, setIsNotesPanelOpen] = useState(false);
+  const [activityVisibleCount, setActivityVisibleCount] = useState(20);
+  const [activitySearch, setActivitySearch] = useState("");
+  const stageScrollPositionsRef = useRef<Partial<Record<ProjectStage, number>>>({});
   const assemblySaveTimerRef = useRef<number | null>(null);
   const takeoffSaveTimerRef = useRef<number | null>(null);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -486,16 +507,29 @@ export default function ProjectPageClient({ projectName }: { projectName: string
     });
   }, [activity, activityFilter]);
 
-  const groupedActivity = useMemo(() => {
+  const searchedActivity = useMemo(() => {
+    const query = activitySearch.trim().toLowerCase();
+    if (!query) return activityByFilter;
+    return activityByFilter.filter((entry) => (
+      `${entry.title} ${entry.description} ${entry.relatedFile ?? ""} ${entry.relatedFolder ?? ""}`
+        .toLowerCase()
+        .includes(query)
+    ));
+  }, [activityByFilter, activitySearch]);
+
+  const visibleActivity = useMemo(
+    () => searchedActivity.slice(0, activityVisibleCount),
+    [activityVisibleCount, searchedActivity],
+  );
+
+  const groupedVisibleActivity = useMemo(() => {
     const groups = new Map<string, ActivityEntry[]>();
-    for (const entry of activityByFilter) {
+    for (const entry of visibleActivity) {
       const label = dayLabel(entry.timestamp);
-      const group = groups.get(label) ?? [];
-      group.push(entry);
-      groups.set(label, group);
+      groups.set(label, [...(groups.get(label) ?? []), entry]);
     }
     return Array.from(groups.entries());
-  }, [activityByFilter]);
+  }, [visibleActivity]);
 
   const takeoffGroupsByKey = useMemo(() => {
     return new Map(takeoffGroups.map((group) => [group.key, group]));
@@ -1935,6 +1969,35 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   }, [loadProjectData]);
 
   useEffect(() => {
+    const readStage = () => {
+      const urlStage = new URLSearchParams(window.location.search).get("stage");
+      const rememberedStage = window.localStorage.getItem(stageStorageKey);
+      const nextStage = isProjectStage(urlStage)
+        ? urlStage
+        : isProjectStage(rememberedStage)
+          ? rememberedStage
+          : "overview";
+      setActiveStage(nextStage);
+      window.requestAnimationFrame(() => window.scrollTo({ top: stageScrollPositionsRef.current[nextStage] ?? 0 }));
+    };
+
+    readStage();
+    window.addEventListener("popstate", readStage);
+    return () => window.removeEventListener("popstate", readStage);
+  }, [stageStorageKey]);
+
+  const navigateToStage = useCallback((stage: ProjectStage, replace = false) => {
+    stageScrollPositionsRef.current[activeStage] = window.scrollY;
+    setActiveStage(stage);
+    setActivityVisibleCount(20);
+    window.localStorage.setItem(stageStorageKey, stage);
+    const url = new URL(window.location.href);
+    url.searchParams.set("stage", stage);
+    window.history[replace ? "replaceState" : "pushState"]({}, "", `${url.pathname}${url.search}${url.hash}`);
+    window.requestAnimationFrame(() => window.scrollTo({ top: stageScrollPositionsRef.current[stage] ?? 0, behavior: "smooth" }));
+  }, [activeStage, stageStorageKey]);
+
+  useEffect(() => {
     void loadProjectFiles();
   }, [loadProjectFiles]);
 
@@ -2581,29 +2644,85 @@ export default function ProjectPageClient({ projectName }: { projectName: string
   const [showEstimate, setShowEstimate] = useState(false);
 
   return (
-    <main style={{ minHeight: '100vh', background: '#f4efe5', color: '#2f2a24', padding: 'clamp(12px, 3vw, 28px)', fontFamily: 'Arial, sans-serif' }}>
-      <div style={{ width: '100%', maxWidth: 980, margin: '0 auto' }}>
+    <main className="project-workspace">
+      <div className="project-workspace__content">
         <Link href="/" style={{ display: 'inline-block', marginBottom: 18, color: '#766b5d', textDecoration: 'none' }}>← Back to Workspace</Link>
 
-        <header style={{ marginBottom: 18 }}>
+        <header className="project-workspace__header">
           <p style={{ margin: 0, color: '#766b5d', fontSize: 14 }}>Dimcan Project</p>
           {isEditingTitle ? (
             <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 8 }}>
               <input ref={titleInputRef} value={titleDraft} onChange={(e) => setTitleDraft(e.target.value)} onKeyDown={(e)=>{ if (e.key==='Enter') void saveTitle(titleDraft); if (e.key==='Escape') cancelTitle(); }} onBlur={() => { void saveTitle(titleDraft); }} style={{ fontSize: 28, fontWeight: 700, padding: '8px 12px', borderRadius: 10, border: '1px solid #d8cdbc' }} />
             </div>
           ) : (
-            <h1 onClick={() => { setTitleError(null); setIsEditingTitle(true); }} style={{ margin: '8px 0 0', fontSize: 'clamp(26px, 5vw, 32px)', fontWeight: 700, cursor: 'pointer' }}>{projectTitle}</h1>
+            <h1 onClick={() => { setTitleError(null); setIsEditingTitle(true); }} className="project-workspace__project-title">{projectTitle}</h1>
           )}
           <p style={{ margin: '8px 0 0', color: saveStatus === 'error' ? '#a1260d' : '#9a8f80', fontSize: 12 }}>
             {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? 'Saved' : saveStatus === 'error' ? 'Could not save' : '\u00a0'}
+            {computedPricingSummary.hasIncompletePricing ? ` · ${computedPricingSummary.incompleteAssemblies.length} incomplete pricing item${computedPricingSummary.incompleteAssemblies.length === 1 ? "" : "s"}` : ""}
           </p>
           {titleError && (
             <p style={{ margin: '6px 0 0', color: '#a1260d', fontSize: 13 }}>
               {titleError}
             </p>
           )}
+          <div className="project-workspace__header-actions">
+            <button onClick={() => activeStage === "files" ? openFilePicker() : navigateToStage("files")}>
+              {activeStage === "files" ? "Upload files" : "Open files"}
+            </button>
+            <details>
+              <summary aria-label="Project actions">⋯</summary>
+              <div>
+                <button onClick={() => setIsEditingTitle(true)}>Rename project</button>
+                <Link href="/assembly-library">Assembly library</Link>
+              </div>
+            </details>
+          </div>
         </header>
 
+        <nav className="project-workspace__tabs" aria-label="Project stages">
+          {PROJECT_STAGES.map((stage) => (
+            <button key={stage.id} className={activeStage === stage.id ? "is-active" : ""} aria-current={activeStage === stage.id ? "page" : undefined} onClick={() => navigateToStage(stage.id)}>
+              {stage.label}
+              {stage.id === "files" && <span>{projectFiles.length}</span>}
+              {stage.id === "activity" && <span>{activity.length}</span>}
+            </button>
+          ))}
+        </nav>
+
+        {activeStage === "overview" && (
+          <div className="project-overview">
+            <div className="project-stage-heading">
+              <div><p>Project at a glance</p><h2>Everything important, without the noise.</h2></div>
+              <button onClick={() => setIsNotesPanelOpen(true)}>Open notes</button>
+            </div>
+            {isProjectDataLoading ? (
+              <div className="project-skeleton-grid" aria-label="Loading project overview">{Array.from({ length: 6 }, (_, index) => <div key={index} />)}</div>
+            ) : (
+              <>
+                <div className="project-overview__grid">
+                  <button className="project-summary-card" onClick={() => navigateToStage("files")}><span>Files</span><strong>{projectFiles.length}</strong><small>{projectFiles.length ? `${fileFilterCounts.Drawings} drawings · ${fileFilterCounts.Photos} photos` : "Upload plans, photos, and documents"}</small><b>View files →</b></button>
+                  <button className="project-summary-card" onClick={() => setIsNotesPanelOpen(true)}><span>Notes</span><strong>{projectNotes.length}</strong><small>{projectNotes[0]?.text || "Capture a client request or site decision"}</small><b>Open notes →</b></button>
+                  <button className="project-summary-card" onClick={() => navigateToStage("takeoff")}><span>Takeoff</span><strong>{takeoffItems.length}</strong><small>{takeoffItems.length ? `${groupedTakeoffItems.length} measured locations` : "No measurements recorded yet"}</small><b>Open takeoff →</b></button>
+                  <button className="project-summary-card" onClick={() => navigateToStage("assemblies")}><span>Assemblies</span><strong>{assembliesState.length}</strong><small>{assembliesState.length ? `${assembliesState.filter((item) => item.takeoffControl).length} linked to takeoff` : "Build reusable scope and costs"}</small><b>View assemblies →</b></button>
+                  <button className="project-summary-card project-summary-card--pricing" onClick={() => navigateToStage("pricing")}><span>Pricing</span><strong>{formatCurrency(computedPricingSummary.finalProjectTotal)}</strong><small>{computedPricingSummary.hasIncompletePricing ? `${computedPricingSummary.incompleteAssemblies.length} assemblies need attention` : "Current estimated project total"}</small><b>Review pricing →</b></button>
+                  <button className="project-summary-card" onClick={() => navigateToStage("activity")}><span>Activity</span><strong>{activity.length}</strong><small>{activity[0]?.title || "No project history yet"}</small><b>View history →</b></button>
+                </div>
+                <section className="project-insight">
+                  <div><span>AI project understanding</span><h2>{understanding.suggestedProjectName || projectTitle}</h2><p>{understanding.projectContext || "Add project files and notes to build a clearer project understanding."}</p></div>
+                  <div className="project-insight__confidence"><strong>{understanding.confidence}%</strong><span>confidence</span></div>
+                </section>
+                <section className="project-overview__activity">
+                  <div className="project-overview__section-heading"><div><span>Recent activity</span><h2>Latest project changes</h2></div><button onClick={() => navigateToStage("activity")}>View full history</button></div>
+                  {activity.slice(0, 5).map((entry) => <div className="project-overview__activity-row" key={entry.id}><span>{activityTypeIcon(entry.type)}</span><div><strong>{entry.title}</strong><small>{new Date(entry.timestamp).toLocaleString()}</small></div></div>)}
+                  {activity.length === 0 && <p className="project-empty">Project updates will appear here.</p>}
+                </section>
+              </>
+            )}
+          </div>
+        )}
+
+        {activeStage === "files" && (
         <section
           onDragEnter={handleFileDragEnter}
           onDragOver={handleFileDragOver}
@@ -2807,10 +2926,14 @@ export default function ProjectPageClient({ projectName }: { projectName: string
             </div>
           </div>
         </section>
+        )}
 
-        <section style={{ marginBottom: 16, background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 12, padding: 16 }}>
+        {isNotesPanelOpen && (
+        <div className="project-sheet-backdrop" onMouseDown={() => setIsNotesPanelOpen(false)}>
+        <section className="project-sheet" onMouseDown={(event) => event.stopPropagation()}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Project Notes</h2>
+            <button className="project-sheet__close" onClick={() => setIsNotesPanelOpen(false)} aria-label="Close notes">×</button>
             <div style={{ color: saveStatus === 'error' ? '#a1260d' : '#9a8f80', fontSize: 12 }}>
               {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? 'Saved' : saveStatus === 'error' ? 'Could not save' : '\u00a0'}
             </div>
@@ -2897,7 +3020,10 @@ export default function ProjectPageClient({ projectName }: { projectName: string
             )}
           </div>
         </section>
+        </div>
+        )}
 
+        {activeStage === "takeoff" && (
         <section style={{ marginBottom: 16, background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 12, padding: 16 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             <div>
@@ -3076,7 +3202,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
             </div>
           )}
         </section>
+        )}
 
+        {activeStage === "assemblies" && (
         <AssembliesPanel
           assemblies={assembliesState}
           isLoading={isProjectDataLoading}
@@ -3087,7 +3215,9 @@ export default function ProjectPageClient({ projectName }: { projectName: string
           onDeleteAssembly={deleteAssembly}
           onAutosaveAssemblyEdit={autosaveAssemblyEdit}
         />
+        )}
 
+        {activeStage === "pricing" && (
         <section style={{ marginBottom: 16, background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 12, padding: 16 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             <div>
@@ -3372,7 +3502,11 @@ export default function ProjectPageClient({ projectName }: { projectName: string
             </div>
           )}
         </section>
+        )}
 
+        {activeStage === "overview" && (
+        <details className="project-understanding-details">
+          <summary>Edit project understanding</summary>
         <section style={{ marginBottom: 16, background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 12, padding: 16 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             <div>
@@ -3478,7 +3612,10 @@ export default function ProjectPageClient({ projectName }: { projectName: string
             </div>
           </div>
         </section>
+        </details>
+        )}
 
+        {activeStage === "activity" && (
         <section style={{ marginBottom: 16, background: '#fffaf2', border: '1px solid #d8cdbc', borderRadius: 12, padding: 16 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Activity</h2>
@@ -3531,6 +3668,14 @@ export default function ProjectPageClient({ projectName }: { projectName: string
           )}
 
           <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <input
+              type="search"
+              value={activitySearch}
+              onChange={(event) => { setActivitySearch(event.target.value); setActivityVisibleCount(20); }}
+              placeholder="Search project history"
+              aria-label="Search project history"
+              style={{ minHeight: 44, minWidth: 220, flex: '1 1 260px', border: '1px solid #d8cdbc', borderRadius: 999, padding: '8px 14px', background: '#fff' }}
+            />
             {ACTIVITY_FILTERS.map((filter) => {
               const isActive = activityFilter === filter;
               return (
@@ -3546,12 +3691,12 @@ export default function ProjectPageClient({ projectName }: { projectName: string
           </div>
 
           <div style={{ marginTop: 12, display: 'grid', gap: 12 }}>
-            {groupedActivity.length === 0 ? (
+            {groupedVisibleActivity.length === 0 ? (
               <div style={{ border: '1px dashed #d8cdbc', borderRadius: 8, padding: 12, color: '#766b5d' }}>
                 {activityFilter === 'All' ? 'No project activity yet.' : `No activity in ${activityFilter}.`}
               </div>
             ) : (
-              groupedActivity.map(([groupLabel, entries]) => (
+              groupedVisibleActivity.map(([groupLabel, entries]) => (
                 <div key={groupLabel} style={{ display: 'grid', gap: 8 }}>
                   <div style={{ color: '#766b5d', fontSize: 12, fontWeight: 700, textTransform: 'uppercase' }}>{groupLabel}</div>
                   {entries.map((entry) => {
@@ -3628,7 +3773,13 @@ export default function ProjectPageClient({ projectName }: { projectName: string
               ))
             )}
           </div>
+          {visibleActivity.length < searchedActivity.length && (
+            <button className="project-activity-load-more" onClick={() => setActivityVisibleCount((count) => count + 20)}>
+              Load more activity
+            </button>
+          )}
         </section>
+        )}
 
       </div>
 

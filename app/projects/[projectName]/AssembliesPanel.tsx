@@ -467,7 +467,7 @@ export default function AssembliesPanel({
                   </div>
                   <div style={{ position: "relative", display: "flex", gap: 8 }}>
                     <button
-                      onClick={() => setExpandedAssemblies((current) => ({ ...current, [assembly.id]: !current[assembly.id] }))}
+                      onClick={() => setExpandedAssemblies((current) => current[assembly.id] ? {} : { [assembly.id]: true })}
                       style={{ minHeight: 44, border: "1px solid #d8cdbc", background: "#fffaf2", color: "#2f2a24", borderRadius: 8, padding: "10px 12px", cursor: "pointer" }}
                     >
                       {expanded ? "Collapse" : "Expand"}

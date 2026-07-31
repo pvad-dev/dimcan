@@ -11,6 +11,8 @@ This document defines reusable interface standards for Dimcan Platform, grounded
    - Core content cards/sections
 2. Show critical status near the primary title (for example save state).
 3. Keep navigation simple and explicit (back to workspace, archive links, project entry points).
+4. Project workspaces use a compact sticky context header followed by sticky stage navigation.
+5. Stage changes are meaningful navigation state and must remain deep-linkable and compatible with browser Back/Forward.
 
 ## 2) Card Standards
 
@@ -58,6 +60,8 @@ This document defines reusable interface standards for Dimcan Platform, grounded
 2. Use wrapping/flexible layouts for controls and metadata.
 3. Do not rely only on hover interactions for critical actions.
 4. Preserve readable spacing and touch-safe density.
+5. Stage tabs scroll horizontally on narrow screens without causing page-width overflow.
+6. Complex editing uses a full-width or full-screen sheet on phone-sized layouts.
 
 ## 8) Touch Target Requirements
 
@@ -120,8 +124,20 @@ This document defines reusable interface standards for Dimcan Platform, grounded
 3. Prefer additive enhancements over disruptive redesigns.
 4. Align server contracts and client state shapes before introducing new modules.
 5. Introduce shared UI primitives when repetition grows, while preserving current behavior.
+6. Mount only the active heavy project stage; Overview summaries should reuse already-loaded state and calculations.
+7. Preserve stage-local edit state when viewport dimensions change.
 
-## 16) Assemblies Estimating UX
+## 16) Project Stage Workspace
+
+1. Primary stages are Overview, Files, Takeoff, Assemblies, Pricing, and Activity.
+2. Overview is a decision dashboard, not a duplicate of each full workflow.
+3. Overview summaries show a useful total or status, missing information where relevant, and one clear destination action.
+4. Notes open in a focused sheet from Overview instead of occupying permanent page height.
+5. Full workflow stages use the available workspace width and progressively reveal dense controls.
+6. Activity shows a reasonable recent batch first, supports search/filtering, and loads more without deleting history.
+7. One assembly is selected or expanded at a time unless a future comparison mode is explicitly enabled.
+
+## 17) Assemblies Estimating UX
 
 1. Show assembly cards with concise estimate signals first: category, quantity, labour/material subtotals, markup, and total.
 2. Keep secondary assembly actions in one ellipsis menu (edit, duplicate, delete).
@@ -130,7 +146,7 @@ This document defines reusable interface standards for Dimcan Platform, grounded
 5. Avoid activity noise: create one structured activity entry per create/duplicate/delete and one meaningful edit entry per edit session.
 6. Clearly label estimating assumptions (for example waste application and current tax handling approach).
 
-## 17) Project Pricing UX
+## 18) Project Pricing UX
 
 1. Provide a compact pricing summary first (core subtotals, markup, taxes, final total).
 2. Keep detailed pricing controls in an expandable section (progressive disclosure).

@@ -27,7 +27,9 @@ Primary app routes:
 3. /projects/[projectName] -> app/projects/[projectName]/page.tsx
    - Decodes route param and renders ProjectPageClient
 4. /projects/[projectName] client UI -> app/projects/[projectName]/ProjectPageClient.tsx
-   - Project files, notes, assemblies, understanding, activity
+   - URL-addressable stage workspace: Overview, Files, Takeoff, Assemblies, Pricing, Activity
+   - Query-string stage deep links and browser history (`?stage=<stage>`)
+   - Project files, notes sheet, assemblies, understanding, pricing, and activity
 
 Also present:
 
@@ -249,6 +251,8 @@ Important scope note:
 7. Assemblies management UI with reusable cost model, debounced autosave, and summary calculations
 8. Assembly Library page and project-level import/save bridge for reusable templates
 9. Project pricing summary UI with project-level tax settings and reusable adjustment workflow persisted in project.json
+10. Per-project stage preference in localStorage; the URL remains the shareable/navigation source for active stage
+11. Only the active full workflow is mounted, with Overview using lightweight summaries over shared loaded project state
 
 ## Current UI Patterns in Code
 

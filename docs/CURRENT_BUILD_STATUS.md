@@ -73,13 +73,21 @@ Status is based on repository code inspection at the time of writing.
    - Case-only renames on Windows use a temporary intermediate folder rename to avoid EPERM.
    - project.json is updated after rename to set displayTitle and align assembly projectId references with the new folder name.
    - Project page title rename now performs workspace rename and navigates to /projects/<newName> on success.
+15. Stage-based project workspace:
+   - Sticky compact project context and horizontally scrollable stage navigation
+   - Overview, Files, Takeoff, Assemblies, Pricing, and Activity stages
+   - Deep links through `?stage=` with browser Back/Forward support and per-project stage memory
+   - Concise Overview summaries, AI understanding panel, and five-entry recent activity
+   - Notes moved into a focused responsive sheet
+   - Activity search and incremental 20-entry loading
+   - Active-stage-only mounting for full workflows
+   - Single-expanded assembly list behavior
 
 ## Partially Completed Features
 
 1. Responsive behavior:
-   - Many controls use flexible wrapping and touch-sized buttons.
-   - Project page spacing and title typography use responsive scaling.
-   - No comprehensive breakpoint-based layout system is implemented.
+   - Project workspace has explicit desktop, tablet, and phone stage-navigation and summary-grid breakpoints.
+   - Legacy controls inside full workflow stages still rely partly on flexible wrapping and inline styles.
 2. Design system consistency:
    - Some global CSS tokens exist.
    - Most pages still rely on inline styles and repeated style blocks.

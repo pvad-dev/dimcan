@@ -3734,7 +3734,7 @@ export default function ProjectPageClient({ projectName }: { projectName: string
           <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <input
               type="search"
-              value={activitySearch}
+              value  ={activitySearch}
               onChange={(event) => { setActivitySearch(event.target.value); setActivityVisibleCount(20); }}
               placeholder="Search project history"
               aria-label="Search project history"

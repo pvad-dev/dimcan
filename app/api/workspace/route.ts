@@ -177,10 +177,19 @@ async function appendProjectHistory(
     updatedAt: now,
   };
 
+  if (!(await pathExists(projectDir))) {
+    throw new Error("The project folder could not be found.");
+  }
+
   const tempFilePath = `${projectFilePath}.tmp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  await fs.mkdir(projectDir, { recursive: true });
-  await fs.writeFile(tempFilePath, JSON.stringify(nextData, null, 2), "utf8");
-  await fs.rename(tempFilePath, projectFilePath);
+
+  try {
+    await fs.writeFile(tempFilePath, JSON.stringify(nextData, null, 2), "utf8");
+    await fs.rename(tempFilePath, projectFilePath);
+  } finally {
+    // If the rename failed, remove the orphaned temp file; ignore cleanup errors.
+    await fs.rm(tempFilePath, { force: true }).catch(() => {});
+  }
 }
 
 async function updateProjectDataForRename(projectDir: string, oldName: string, newName: string) {
@@ -240,10 +249,19 @@ async function updateProjectDataForRename(projectDir: string, oldName: string, n
     updatedAt: now,
   };
 
+  if (!(await pathExists(projectDir))) {
+    throw new Error("The project folder could not be found.");
+  }
+
   const tempFilePath = `${projectFilePath}.tmp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  await fs.mkdir(projectDir, { recursive: true });
-  await fs.writeFile(tempFilePath, JSON.stringify(nextData, null, 2), "utf8");
-  await fs.rename(tempFilePath, projectFilePath);
+
+  try {
+    await fs.writeFile(tempFilePath, JSON.stringify(nextData, null, 2), "utf8");
+    await fs.rename(tempFilePath, projectFilePath);
+  } finally {
+    // If the rename failed, remove the orphaned temp file; ignore cleanup errors.
+    await fs.rm(tempFilePath, { force: true }).catch(() => {});
+  }
 }
 
 function projectUpdateErrorMessage(error: unknown) {

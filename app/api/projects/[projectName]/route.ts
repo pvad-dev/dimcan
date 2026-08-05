@@ -262,6 +262,15 @@ function getProjectFilePath(projectPath: string) {
   return filePath;
 }
 
+async function pathExists(targetPath: string) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function createDefaultProjectData(projectName: string): ProjectData {
   const takeoffSettings = defaultTakeoffSettings();
   const takeoffItems = normalizeTakeoffItems([], takeoffSettings);
@@ -419,13 +428,21 @@ async function writeProjectDataAtomic(projectFilePath: string, data: ProjectData
   const tempPath = `${projectFilePath}.tmp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const serialized = JSON.stringify(data, null, 2);
 
-  await fs.writeFile(tempPath, serialized, "utf8");
-  await fs.rename(tempPath, projectFilePath);
+  try {
+    await fs.writeFile(tempPath, serialized, "utf8");
+    await fs.rename(tempPath, projectFilePath);
+  } finally {
+    // If the rename failed, remove the orphaned temp file; ignore cleanup errors.
+    await fs.rm(tempPath, { force: true }).catch(() => {});
+  }
 }
 
 async function ensureAndReadProjectData(projectName: string) {
   const projectPath = getProjectPath(projectName);
-  await fs.mkdir(projectPath, { recursive: true });
+
+  if (!(await pathExists(projectPath))) {
+    throw new Error("The project folder could not be found.");
+  }
 
   const projectFilePath = getProjectFilePath(projectPath);
 
@@ -534,11 +551,13 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to read project data.";
     const status =
-      message === "Invalid project name." ||
-      message === "Invalid project path." ||
-      message === "Invalid project file path."
-        ? 400
-        : 500;
+      message === "The project folder could not be found."
+        ? 404
+        : message === "Invalid project name." ||
+            message === "Invalid project path." ||
+            message === "Invalid project file path."
+          ? 400
+          : 500;
 
     return errorResponse(status, message.includes("JSON") ? "Project data is corrupted." : message);
   }
@@ -565,12 +584,14 @@ export async function PATCH(request: NextRequest) {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to save project data.";
     const status =
-      message === "Invalid project name." ||
-      message === "Invalid project path." ||
-      message === "Invalid project file path." ||
-      message === "Invalid request body."
-        ? 400
-        : 500;
+      message === "The project folder could not be found."
+        ? 404
+        : message === "Invalid project name." ||
+            message === "Invalid project path." ||
+            message === "Invalid project file path." ||
+            message === "Invalid request body."
+          ? 400
+          : 500;
 
     return errorResponse(status, message);
   }

@@ -2,23 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { PROJECTS_ROOT, STANDARD_FOLDERS, WORKSPACE_PATH } from "../../../lib/workspace-path";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const WORKSPACE_PATH = String.raw`K:\RenovationPlatform\Dimcan Workspace`;
-const PROJECTS_ROOT = path.join(WORKSPACE_PATH, "Projects");
-
-const STANDARD_FOLDERS = [
-  "Projects",
-  "Clients",
-  "Suppliers",
-  "Templates",
-  "Price Lists",
-  "Standards",
-  "AI Knowledge",
-  "Archive",
-];
 
 const PROJECT_FOLDERS = [
   "Photos",

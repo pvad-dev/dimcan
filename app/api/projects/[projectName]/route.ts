@@ -23,12 +23,11 @@ import {
   type TakeoffItem,
   type TakeoffSettings,
 } from "../../../../lib/takeoff";
+import { PROJECTS_ROOT } from "../../../../lib/workspace-path";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const WORKSPACE_PATH = String.raw`K:\RenovationPlatform\Dimcan Workspace`;
-const PROJECTS_ROOT = path.join(WORKSPACE_PATH, "Projects");
 const PROJECT_SCHEMA_VERSION = 2;
 
 const NOTE_CATEGORIES = ["General", "Client", "Site", "Scope", "Pricing", "Decision"] as const;

@@ -1,13 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { PROJECTS_ROOT } from "../../../../../lib/workspace-path";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const WORKSPACE_PATH = String.raw`K:\RenovationPlatform\Dimcan Workspace`;
-
-const PROJECTS_ROOT = path.join(WORKSPACE_PATH, "Projects");
 const ALLOWED_FOLDERS = ["Photos", "Videos", "Drawings", "Notes", "Documents"] as const;
 const ALLOWED_FOLDER_SET = new Set<string>(ALLOWED_FOLDERS);
 

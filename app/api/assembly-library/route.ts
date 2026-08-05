@@ -13,11 +13,11 @@ import {
   type AssemblyLibraryTemplate,
   type ProjectAssemblyRecord,
 } from "../../../lib/assembly-estimating";
+import { WORKSPACE_PATH } from "../../../lib/workspace-path";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const WORKSPACE_PATH = String.raw`K:\RenovationPlatform\Dimcan Workspace`;
 const LIBRARY_FILE_PATH = path.join(WORKSPACE_PATH, "assembly-library.json");
 
 function errorResponse(status: number, message: string) {
